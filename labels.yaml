@@ -1,0 +1,9 @@
+# 单位为毫米。每个机型的第一项是默认规格，可选 name 自定义显示名称。
+N1:
+  - width_mm: 14
+    length_mm: 50
+P2:
+  - width_mm: 48
+    length_mm: 50
+  - width_mm: 40
+    length_mm: 30
