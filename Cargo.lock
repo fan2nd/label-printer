@@ -2537,6 +2537,7 @@ dependencies = [
  "barcoders",
  "base64 0.22.1",
  "btleplug",
+ "cc",
  "csv",
  "dbus",
  "dioxus",

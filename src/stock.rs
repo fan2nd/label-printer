@@ -6,7 +6,11 @@ pub const P2_HEAD_DOTS: u32 = 384;
 pub const MAX_MEDIA_LENGTH_DOTS: u32 = 1600;
 
 pub fn dots(mm: u16) -> u32 {
-    (u32::from(mm) * DPI * 10 + 127) / 254
+    dots_at(mm, DPI)
+}
+
+pub fn dots_at(mm: u16, dpi: u32) -> u32 {
+    (u32::from(mm) * dpi * 10 + 127) / 254
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, PartialOrd, Ord)]
@@ -14,13 +18,25 @@ pub enum Model {
     #[default]
     N1,
     P2,
+    PtP300bt,
 }
 
 impl Model {
+    pub fn dpi(self) -> u32 {
+        if self == Self::PtP300bt {
+            180
+        } else {
+            DPI
+        }
+    }
+    pub fn length_dots(self, mm: u16) -> u32 {
+        dots_at(mm, self.dpi())
+    }
     pub fn head_dots(self) -> u32 {
         match self {
             Self::N1 => N1_HEAD_DOTS,
             Self::P2 => P2_HEAD_DOTS,
+            Self::PtP300bt => 128,
         }
     }
 }

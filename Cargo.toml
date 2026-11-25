@@ -36,5 +36,6 @@ dbus = { version = "0.9", features = ["vendored"], optional = true }
 strip = true
 
 [build-dependencies]
+cc = "1"
 serde = { version = "1", features = ["derive"] }
 yaml_serde = "0.10"

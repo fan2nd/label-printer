@@ -5,8 +5,8 @@ use std::{
     fmt::Write,
 };
 
-use crate::stock::{dots, Model};
-pub use crate::stock::{DPI, MAX_MEDIA_LENGTH_DOTS, P2_HEAD_DOTS};
+use crate::stock::{dots_at, Model, DPI};
+pub use crate::stock::{MAX_MEDIA_LENGTH_DOTS, P2_HEAD_DOTS};
 pub const MAX_MEDIA_WIDTH_DOTS: u32 = P2_HEAD_DOTS;
 pub const MAX_BATCH: usize = 500;
 pub const MAX_FIELDS: usize = 24;
@@ -48,6 +48,8 @@ impl Field {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Media {
+    #[serde(default = "default_dpi")]
+    pub dpi: u32,
     #[serde(default)]
     pub cut: crate::stock::Cut,
     pub name: String,
@@ -55,6 +57,10 @@ pub struct Media {
     pub length_mm: u16,
     pub printable_width_dots: u32,
     pub printable_length_dots: u32,
+}
+
+fn default_dpi() -> u32 {
+    DPI
 }
 
 pub fn builtin_media() -> &'static [(Model, Media, &'static [&'static str])] {
@@ -82,6 +88,7 @@ impl Media {
     #[cfg(test)]
     pub fn p2() -> Self {
         Self {
+            dpi: DPI,
             cut: Default::default(),
             name: "P2 test".into(),
             width_mm: 48,
@@ -94,6 +101,7 @@ impl Media {
     #[cfg(test)]
     pub fn p2_40x30() -> Self {
         Self {
+            dpi: DPI,
             cut: Default::default(),
             name: "P2 small test".into(),
             width_mm: 40,
@@ -104,7 +112,10 @@ impl Media {
     }
 
     pub fn supports_p2(&self) -> bool {
-        self.width_mm <= 57 && self.printable_width_dots <= P2_HEAD_DOTS && self.validate().is_ok()
+        self.dpi == DPI
+            && self.width_mm <= 57
+            && self.printable_width_dots <= P2_HEAD_DOTS
+            && self.validate().is_ok()
     }
 
     pub fn canvas_size(&self) -> (u32, u32) {
@@ -128,6 +139,7 @@ impl Media {
     pub fn is_known_n1(&self) -> bool {
         builtin_media().iter().any(|(model, stock, _)| {
             *model == Model::N1
+                && self.dpi == stock.dpi
                 && stock.width_mm == self.width_mm
                 && stock.length_mm == self.length_mm
                 && stock.canvas_size() == self.canvas_size()
@@ -145,9 +157,11 @@ impl Media {
             return Err(format!("可印尺寸须为横向 1～{MAX_MEDIA_WIDTH_DOTS} 点、走纸方向 1～{MAX_MEDIA_LENGTH_DOTS} 点。"));
         }
         self.effective_cut().validate(along, across)?;
-        // 203 dpi / 25.4 mm per inch, rounded to the nearest dot.
-        if across > dots(self.width_mm) || along > dots(self.length_mm) {
-            return Err("可印尺寸不能超过纸面尺寸（203 dpi）。".into());
+        if !matches!(self.dpi, 180 | 203) {
+            return Err("标签规格需要 180 或 203 dpi。".into());
+        }
+        if across > dots_at(self.width_mm, self.dpi) || along > dots_at(self.length_mm, self.dpi) {
+            return Err(format!("可印尺寸不能超过纸面尺寸（{} dpi）。", self.dpi));
         }
         Ok(())
     }
@@ -169,6 +183,7 @@ fn legacy_media() -> Media {
         length_mm: 50,
         printable_width_dots: 96,
         printable_length_dots: 400,
+        dpi: DPI,
         cut: Default::default(),
     }
 }
@@ -1031,6 +1046,7 @@ mod tests {
     fn media_change_clips_existing_layout() {
         let mut template = Template::example();
         template.media = Media {
+            dpi: DPI,
             cut: Default::default(),
             name: "窄标签，仅导出".into(),
             width_mm: 8,

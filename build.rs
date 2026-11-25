@@ -9,7 +9,7 @@ use std::{
     fs,
     path::PathBuf,
 };
-use stock::{dots, Model, MAX_MEDIA_LENGTH_DOTS};
+use stock::{Model, MAX_MEDIA_LENGTH_DOTS};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,11 +26,22 @@ struct Label {
 fn main() {
     println!("cargo:rerun-if-changed=labels.yaml");
     println!("cargo:rerun-if-changed=src/stock.rs");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && env::var_os("CARGO_FEATURE_DESKTOP").is_some()
+    {
+        println!("cargo:rerun-if-changed=src/brother_macos.m");
+        cc::Build::new()
+            .file("src/brother_macos.m")
+            .flag("-fobjc-arc")
+            .compile("brother_rfcomm");
+        println!("cargo:rustc-link-lib=framework=IOBluetooth");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+    }
     let yaml = fs::read_to_string("labels.yaml").expect("读取 labels.yaml");
     let catalog: BTreeMap<Model, Vec<Label>> =
         yaml_serde::from_str(&yaml).expect("解析 labels.yaml");
     let mut generated = String::from("vec![\n");
-    for model in [Model::N1, Model::P2] {
+    for model in [Model::N1, Model::P2, Model::PtP300bt] {
         let entries = catalog
             .get(&model)
             .filter(|e| !e.is_empty())
@@ -54,8 +65,13 @@ fn main() {
                 !name.trim().is_empty() && names.insert(name.clone()),
                 "labels.yaml 中 {model:?} 的规格名为空或重复：{name}"
             );
-            let width = dots(w).min(model.head_dots());
-            let length = dots(h);
+            let width = if model == Model::PtP300bt {
+                assert_eq!(w, 12);
+                64
+            } else {
+                model.length_dots(w).min(model.head_dots())
+            };
+            let length = model.length_dots(h);
             assert!(
                 width > 0 && (1..=MAX_MEDIA_LENGTH_DOTS).contains(&length),
                 "labels.yaml 中 {name} 的纸张尺寸超出范围"
@@ -64,7 +80,8 @@ fn main() {
             cut.validate(length, width)
                 .unwrap_or_else(|e| panic!("labels.yaml {name}: {e}"));
             let cut=format!("crate::stock::Cut {{rounded:{:?},combined:{:?},radius_dots:{},feed_margin_mm:{},regions_dots:vec!{:?} }}",cut.rounded,cut.combined,cut.radius_dots,cut.feed_margin_mm,cut.regions_dots);
-            writeln!(generated,"(Model::{model:?}, Media {{ cut:{cut}, name: {name:?}.into(), width_mm: {w}, length_mm: {h}, printable_width_dots: {width}, printable_length_dots: {length} }}, &{barcodes:?}[..]),").unwrap();
+            let dpi = model.dpi();
+            writeln!(generated,"(Model::{model:?}, Media {{ dpi:{dpi}, cut:{cut}, name: {name:?}.into(), width_mm: {w}, length_mm: {h}, printable_width_dots: {width}, printable_length_dots: {length} }}, &{barcodes:?}[..]),").unwrap();
         }
     }
     generated.push(']');

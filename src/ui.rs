@@ -180,7 +180,7 @@ pub fn App() -> Element {
     let model = selected_model();
     let model_name = model.name();
     let supported_stock = model.supported_stock();
-    let delivery = if model == Model::N1 {
+    let delivery = if model != Model::P2 {
         "打印机已确认"
     } else {
         "已发送"
@@ -259,7 +259,7 @@ pub fn App() -> Element {
         .read()
         .get(field())
         .map(|(item, _)| item.clone());
-    let physical_caption = format!("{width_mm} × {length_mm} mm · {} dpi", core::DPI);
+    let physical_caption = format!("{width_mm} × {length_mm} mm · {} dpi", media.dpi);
     let cut = media.effective_cut();
     // A schematic 1.5 mm corner is used only for the preview of unmeasured stock.
     let radius = match (cut.rounded, cut.regions_dots.is_empty(), cut.radius_dots) {
@@ -378,15 +378,16 @@ pub fn App() -> Element {
                     select { class:"printer-model", "aria-label":"打印机型号", disabled:is_busy || linked, value:"{model_name}", onchange: move |e| {
                         if busy() || connection.read().is_some() { return; }
                         let next = match e.value().as_str() {
-                            "P2" => Model::P2, "N1" => Model::N1, _ => return,
+                            "PT-P300BT" if cfg!(target_os="macos") => Model::PtP300bt, "P2" => Model::P2, "N1" => Model::N1, _ => return,
                         };
                         let builtin = core::builtin_media().iter().any(|(_, m, _)| *m == template.read().media);
-                        if builtin { template.write().media = Media::for_model(next); }
+                        if builtin || next == Model::PtP300bt || selected_model()==Model::PtP300bt { template.write().media = Media::for_model(next); }
                         selected_model.set(next);
                         page.set(0);
                     },
                         option { value:"N1", "精臣 N1" }
                         option { value:"P2", "德佟 P2" }
+                        if cfg!(target_os="macos") { option { value:"PT-P300BT", "Brother PT-P300BT" } }
                     }
                     if model == Model::N1 {
                         select { "aria-label":"N1 连接方式", disabled:is_busy || linked, value:if usb_mode() {"usb"} else {"ble"},
@@ -714,7 +715,11 @@ pub fn App() -> Element {
                 }
                 aside { class: "inspector",
                     section { class: "region",
-                        h2 { "标签规格" }
+                        div { class:"section-row", h2 { "标签规格" }
+                            if model == Model::N1 && supported_media {
+                                button { r#type:"button", disabled:is_busy, onclick:move |_| confirm_print.set(Some(PrintScope::N1Range)), "标定四边范围" }
+                            }
+                        }
                         label { "选用规格", select { disabled: is_busy, value: "{media_selector}", onchange: move |e| {
                             if let Ok(i) = e.value().parse::<usize>() {
                                 if let Some(stock) = media_choices.read().get(i).cloned() {
@@ -730,7 +735,15 @@ pub fn App() -> Element {
                                 option { key:"{i}", value:"{i}", "{entry.name}" }
                             }
                         } }
-                        span { class:"muted", "{layout_name} · {corner_name} · 可打区 {usable_length} × {printable_width_dots} 点" }
+                        if model==Model::PtP300bt && supported_media {
+                            label { "打印图像长 / mm", input { r#type:"number", min:1, max:225, disabled:is_busy, value:"{length_mm}", onchange:move |e| {
+                                if let Ok(n @ 1..=225)=e.value().parse::<u16>() {
+                                    let mut t=template.write(); t.media.length_mm=n; t.media.printable_length_dots=model.length_dots(n);
+                                } else {notice.set(("请输入 1～225 mm 的图像长度。".into(),true));}
+                            } }
+                            }
+                            span {class:"muted","12 mm 连续色带 · 可打高度 64 点 · 手动切带"}
+                        } else { span { class:"muted", "{layout_name} · {corner_name} · 可打区 {usable_length} × {printable_width_dots} 点" } }
                         if feed_margin > 0 { span { class:"muted", "走纸首尾各留 {feed_margin} mm" } }
                     }
                     section { class: "region",
@@ -844,21 +857,29 @@ pub fn App() -> Element {
             if let Some(scope) = confirm_print() {
                     dialog { id:"print-dialog", class:"dialog native-dialog", "aria-labelledby":"print-title",
                         onmounted:move |_| { let _=document::eval("const d=document.getElementById('print-dialog'); d.addEventListener('cancel', e=>{e.preventDefault();d.querySelector('button').click()}); d.addEventListener('click', e=>{if(e.target.closest('button')) d.close()}); d.showModal(); d.querySelector('button').focus()"); },
-                        h2 { id:"print-title", if matches!(scope, PrintScope::Current(_)) { "试打第 {number} 条？" } else { "打印 {total} 张标签？" } }
+                        h2 { id:"print-title", if scope == PrintScope::N1Range { "N1 四边范围标定" } else if matches!(scope, PrintScope::Current(_)) { "试打第 {number} 条？" } else { "打印 {total} 张标签？" } }
+                        if scope == PrintScope::N1Range {
+                            div { class:"range-preview", dangerous_inner_html:crate::raster::N1_RANGE_SVG }
+                            p { "将字母摆正：L 左、R 右、T 上、B 下。从各边向内读，长刻度每 8 点。左右尺的台阶由上往下编号 0～7，上下尺由左往右编号 0～7。" }
+                            p { "每边缺失点数 = 所在组起点 + 最外侧可见台阶编号。8 点约 1 mm。纸面空白请分别量四条纸边到对应标尺线端点的距离。" }
+                            p { "装入 12 × 25 mm 标签后打印一张。测试发送完整 200 × 96 点，跳过日常走纸校正和边缘裁切。" }
+                        } else {
                         p { if matches!(scope, PrintScope::Current(_)) { "仅打印当前预览的 1 张。" } else { "{label_count} 条记录，每条连续打印 {copy_count} 份。" } }
-                        if model == Model::P2 {
+                        if model == Model::PtP300bt { p { "请装入 12 mm TZe 连续色带，打印完成后手动切带。" } } else if model == Model::P2 {
                             p { "请将 {width_mm} × {length_mm} mm 间隙标签居中装入。发送后请核对实际出纸。" }
                         } else {
                             p { "请确认 {model_name} 已装好 {width_mm} × {length_mm} mm 标签及对应耗材。" }
                         }
+                        }
                         div { class: "actions",
                             button { r#type: "button", onclick: move |_| confirm_print.set(None), "取消" }
-                            button { r#type: "button", class: "primary", onclick: move |_| {
+                            button { r#type: "button", class: "primary", disabled:!linked, onclick: move |_| {
                                 confirm_print.set(None);
                                 if busy() || !supported_media { return; }
                                 let Some(plan) = PrintJob::new(scope, label_count, copy_count) else { return; };
                                 let repeat = plan.copies;
                                 let job = match scope {
+                                    PrintScope::N1Range => Ok(Vec::new()),
                                     PrintScope::Current(_) => preview().map(|svg| vec![svg]),
                                     PrintScope::Batch => csv_rows.read().as_ref().map_err(Clone::clone).and_then(|rows| {
                                         core::preflight(&template.read(), rows, count(), Sequence { start:start(), step:step(), pad:pad() })
@@ -876,8 +897,10 @@ pub fn App() -> Element {
                                     stop_requested.set(false);
                                     notice.set(("正在准备打印图像…".into(), false));
                                     spawn(async move {
-                                        let pages = tokio::task::spawn_blocking(move || items.iter()
-                                            .map(|svg| model.rasterize(svg, &stock)).collect::<Result<Vec<_>,_>>()).await;
+                                        let pages = tokio::task::spawn_blocking(move || {
+                                            if scope == PrintScope::N1Range { return crate::raster::n1_range_page(&stock).map(|page| vec![page]); }
+                                            items.iter().map(|svg| model.rasterize(svg, &stock)).collect::<Result<Vec<_>,_>>()
+                                        }).await;
                                         match pages {
                                             Ok(Ok(pages)) => {
                                                 let mut printer=printer.lock().await;
@@ -913,7 +936,7 @@ pub fn App() -> Element {
                                         busy.set(false);
                                     });
                                 }
-                            }, "开始打印" }
+                            }, if scope == PrintScope::N1Range && !linked { "请先连接 N1" } else { "开始打印" } }
                         }
                     }
             }

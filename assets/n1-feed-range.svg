@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="96" viewBox="0 0 200 96">
+  <title>N1 · 12 × 25 mm 四边范围标定（每格 1 点）</title>
+  <defs>
+    <!-- Each column has a unique step within its eight-dot group. -->
+    <pattern id="steps" patternUnits="userSpaceOnUse" width="8" height="96">
+      <path d="M0 27h1v4H0z M1 31h1v4H1z M2 35h1v4H2z M3 39h1v4H3z
+               M4 43h1v4H4z M5 47h1v4H5z M6 51h1v4H6z M7 55h1v4H7z
+               M0 61h1v9H0z M4 61h1v5H4z"/>
+    </pattern>
+    <g id="scale">
+      <rect width="100" height="96" fill="url(#steps)"/>
+      <rect y="60" width="100" height="1"/>
+    </g>
+    <!-- Vertical ruler, mirrored at the bottom edge. -->
+    <pattern id="cross-steps" patternUnits="userSpaceOnUse" width="200" height="8">
+      <path d="M90 0h3v1h-3z M93 1h3v1h-3z M96 2h3v1h-3z M99 3h3v1h-3z
+               M102 4h3v1h-3z M105 5h3v1h-3z M108 6h3v1h-3z M111 7h3v1h-3z
+               M81 0h8v1h-8z M85 4h4v1h-4z"/>
+    </pattern>
+    <g id="cross-scale">
+      <rect x="81" width="33" height="48" fill="url(#cross-steps)"/>
+      <rect x="89" width="1" height="48"/>
+    </g>
+  </defs>
+  <rect width="200" height="96" fill="white"/>
+  <use xlink:href="#scale"/>
+  <use xlink:href="#scale" transform="translate(200 0) scale(-1 1)"/>
+  <rect x="72" width="56" height="96" fill="white"/>
+  <use xlink:href="#cross-scale"/>
+  <use xlink:href="#cross-scale" transform="translate(0 96) scale(1 -1)"/>
+  <g font-family="sans-serif" fill="black" text-anchor="middle">
+    <text x="51" y="20" font-size="14">L</text>
+    <text x="149" y="20" font-size="14">R</text>
+    <text x="128" y="10" font-size="10">T</text>
+    <text x="124" y="94" font-size="10">B</text>
+    <g font-size="8">
+      <text x="119" y="18">16</text><text x="119" y="34">32</text>
+      <text x="119" y="66">32</text><text x="119" y="83">16</text>
+    </g>
+    <g font-size="9">
+      <text x="16" y="81">16</text><text x="32" y="81">32</text><text x="48" y="81">48</text>
+      <text x="64" y="81">64</text>
+      <text x="136" y="81">64</text><text x="152" y="81">48</text>
+      <text x="168" y="81">32</text><text x="184" y="81">16</text>
+    </g>
+  </g>
+</svg>

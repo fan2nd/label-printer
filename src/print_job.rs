@@ -5,6 +5,7 @@ use std::ops::Range;
 pub enum PrintScope {
     Current(usize),
     Batch,
+    N1Range,
 }
 
 pub struct PrintJob {
@@ -15,6 +16,10 @@ pub struct PrintJob {
 impl PrintJob {
     pub fn new(scope: PrintScope, records: usize, copies: usize) -> Option<Self> {
         match scope {
+            PrintScope::N1Range => Some(Self {
+                records: 0..1,
+                copies: 1,
+            }),
             PrintScope::Current(index) if index < records => Some(Self {
                 records: index..index + 1,
                 copies: 1,

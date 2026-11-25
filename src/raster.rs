@@ -62,25 +62,44 @@ pub(crate) fn ink_mask(svg: &str) -> Result<Vec<bool>, String> {
 // The N1 needs a one-dot feed correction measured on this model.
 pub(crate) const N1_FEED_SHIFT: u32 = 1;
 
+pub const N1_RANGE_SVG: &str = include_str!("../assets/n1-feed-range.svg");
+
+pub fn n1_range_page(media: &Media) -> Result<Vec<u8>, String> {
+    if !media.is_known_n1() || media.canvas_size() != (200, 96) {
+        return Err("标定标签需要 N1 的 12 × 25 mm 耗材。".into());
+    }
+    pack_rotated(N1_RANGE_SVG, media, 96, 0, &Default::default())
+}
+
 pub fn packed_n1(svg: &str, media: &Media) -> Result<Vec<u8>, String> {
     if !media.is_known_n1() {
         return Err("N1 不支持此标签规格。".into());
     }
-    pack_rotated(svg, media, 96, N1_FEED_SHIFT as usize)
+    pack_rotated(
+        svg,
+        media,
+        96,
+        N1_FEED_SHIFT as usize,
+        media.effective_cut(),
+    )
+}
+
+pub fn packed_brother(svg: &str, media: &Media) -> Result<Vec<u8>, String> {
+    pack_rotated(svg, media, 128, 0, media.effective_cut())
 }
 
 pub fn packed_p2(svg: &str, media: &Media) -> Result<Vec<u8>, String> {
     if !media.supports_p2() {
         return Err("P2 纸宽最多 57 mm，有效打印宽度最多 384 点，请检查标签规格。".into());
     }
-    pack_rotated(svg, media, P2_HEAD_DOTS, 0)
+    pack_rotated(svg, media, P2_HEAD_DOTS, 0, media.effective_cut())
 }
 
 /// Unsupported stock is still editable in its native printable-dot coordinates.
 pub(crate) fn stock_preview_png(svg: &str, media: &Media) -> Result<String, String> {
     media.validate()?;
     let across = media.printable_width_dots;
-    let packed = pack_rotated(svg, media, across, 0)?;
+    let packed = pack_rotated(svg, media, across, 0, media.effective_cut())?;
     preview_png(&packed, media, across)
 }
 
@@ -89,10 +108,10 @@ fn pack_rotated(
     media: &Media,
     head_dots: u32,
     skip_feed_dots: usize,
+    cut: &crate::stock::Cut,
 ) -> Result<Vec<u8>, String> {
     media.validate()?;
     let (along, across) = media.canvas_size();
-    let cut = media.effective_cut();
     let opts = Options {
         fontdb: fonts(),
         ..Default::default()
@@ -376,4 +395,30 @@ fn die_cut_rejects_gap_and_rounded_corners() {
     assert!(!cut.contains(0, 0, 28, 12));
     assert!(!cut.contains(14, 6, 28, 12));
     assert!(cut.contains(22, 6, 28, 12));
+}
+
+#[cfg(test)]
+#[test]
+fn calibration_marks_every_feed_row_at_its_unshifted_step() {
+    let page = n1_range_page(&Media::default()).unwrap();
+    assert_eq!(page.len(), 200 * 12);
+    for x in (0..72usize).chain(128..200) {
+        let distance = x.min(199 - x);
+        for step in 0..8 {
+            let head_dot = 95 - (28 + 4 * step);
+            let bit = page[x * 12 + head_dot / 8] & (0x80 >> (head_dot % 8));
+            assert_eq!(bit != 0, step == distance % 8, "row {x}, step {step}");
+        }
+    }
+    for y in 0..96usize {
+        let distance = y.min(95 - y);
+        let head_dot = 95 - y;
+        for step in 0..8 {
+            let x = 91 + step * 3;
+            assert_eq!(
+                page[x * 12 + head_dot / 8] & (0x80 >> (head_dot % 8)) != 0,
+                step == distance % 8
+            );
+        }
+    }
 }

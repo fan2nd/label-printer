@@ -14,3 +14,7 @@ P2:
     length_mm: 50
   - width_mm: 40
     length_mm: 30
+PtP300bt:
+  - name: "PT-P300BT · 12 mm 连续色带"
+    width_mm: 12
+    length_mm: 50

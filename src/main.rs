@@ -3,6 +3,8 @@
     windows_subsystem = "windows"
 )]
 
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+mod brother;
 mod core;
 #[cfg(feature = "desktop")]
 mod device;
