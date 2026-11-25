@@ -61,9 +61,8 @@ fn edit_position(
     if dx == 0 && dy == 0 {
         return;
     }
-    let media = template.read().media.clone();
     edit_item(template, items, index, |item| {
-        *item = editor::transform(item, &media, mode, dx, dy);
+        *item = editor::transform(item, mode, dx, dy);
     });
 }
 
@@ -101,6 +100,22 @@ pub fn App() -> Element {
         }
     });
     let mut busy = use_signal(|| false);
+    let mut usb_mode = use_signal(|| false);
+    let mut usb_ports = use_signal(Vec::<(String, String)>::new);
+    let mut usb_port = use_signal(String::new);
+    let mut refresh_ports = move || match crate::printer::usb::ports() {
+        Ok(ports) => {
+            if !ports.iter().any(|(path, _)| path == &*usb_port.peek()) {
+                usb_port.set(String::new());
+            }
+            usb_ports.set(ports);
+        }
+        Err(e) => {
+            usb_ports.set(Vec::new());
+            usb_port.set(String::new());
+            notice.set((e, true));
+        }
+    };
     let mut selected_model = use_signal(Model::default);
     let mut remove_element = move |i: usize| {
         if busy() || i >= template.read().elements.len() {
@@ -175,11 +190,11 @@ pub fn App() -> Element {
     let save_name = template.read().name.clone();
     let media = template.read().media.clone();
     let Media {
-        name: _,
         width_mm,
         length_mm,
         printable_width_dots,
         printable_length_dots,
+        ..
     } = media.clone();
     let w = printable_length_dots.clamp(1, core::MAX_MEDIA_LENGTH_DOTS);
     let h = printable_width_dots.clamp(1, core::MAX_MEDIA_WIDTH_DOTS);
@@ -228,18 +243,59 @@ pub fn App() -> Element {
         }
     });
     let feed_shift = model.preview_feed_shift(&media);
+    let outside = use_memo(move || {
+        let draft = template.read();
+        let media = &draft.media;
+        let shift = selected_model().preview_feed_shift(media);
+        canvas_items
+            .read()
+            .iter()
+            .filter(|(item, art)| core::outside_media(media, item, art.as_deref(), shift))
+            .map(|(item, _)| item.id)
+            .collect::<std::collections::HashSet<_>>()
+    });
+    let overlap = use_memo(move || core::check_overlap(&canvas_items.read()).err());
     let chosen = canvas_items
         .read()
         .get(field())
         .map(|(item, _)| item.clone());
     let physical_caption = format!("{width_mm} × {length_mm} mm · {} dpi", core::DPI);
+    let cut = media.effective_cut();
+    // A schematic 1.5 mm corner is used only for the preview of unmeasured stock.
+    let radius = match (cut.rounded, cut.regions_dots.is_empty(), cut.radius_dots) {
+        (Some(true), true, 0) => 12,
+        (Some(true), true, r) => r,
+        _ => 0,
+    };
+    let paper_outline = format!(
+        "border-radius:{}% / {}%",
+        100.0 * f64::from(radius) / f64::from(w),
+        100.0 * f64::from(radius) / f64::from(h)
+    );
+    let transport = if model == Model::N1 && usb_mode() {
+        "USB"
+    } else {
+        "蓝牙"
+    };
+    let feed_margin = cut.feed_margin_mm;
+    let usable_length = printable_length_dots.saturating_sub(2 * crate::stock::dots(feed_margin));
+    let layout_name = match cut.combined {
+        Some(true) => "组合标签",
+        Some(false) => "单张标签",
+        None => "组合类型未标注",
+    };
+    let corner_name = match cut.rounded {
+        Some(true) => "圆角",
+        Some(false) => "直角",
+        None => "角型未标注",
+    };
     let supported_media = model.supports(&media);
     let media_choices = use_memo(move || {
         let model = selected_model();
         core::builtin_media()
             .iter()
-            .filter(|(m, _)| *m == model)
-            .map(|(_, m)| m.clone())
+            .filter(|(m, _, _)| *m == model)
+            .map(|(_, m, _)| m.clone())
             .chain(media_library.read().iter().cloned())
             .collect::<Vec<_>>()
     });
@@ -318,12 +374,13 @@ pub fn App() -> Element {
             header { class: "bar",
                 div { class: "brand", h1 { "{project_name}" } span { class: "muted", "{physical_caption}" } }
                 div { class: "actions",
+                    if !linked {
                     select { class:"printer-model", "aria-label":"打印机型号", disabled:is_busy || linked, value:"{model_name}", onchange: move |e| {
                         if busy() || connection.read().is_some() { return; }
                         let next = match e.value().as_str() {
                             "P2" => Model::P2, "N1" => Model::N1, _ => return,
                         };
-                        let builtin = core::builtin_media().iter().any(|(_, m)| *m == template.read().media);
+                        let builtin = core::builtin_media().iter().any(|(_, m, _)| *m == template.read().media);
                         if builtin { template.write().media = Media::for_model(next); }
                         selected_model.set(next);
                         page.set(0);
@@ -331,8 +388,25 @@ pub fn App() -> Element {
                         option { value:"N1", "精臣 N1" }
                         option { value:"P2", "德佟 P2" }
                     }
-                    span { class: if linked { "status good" } else { "status" }, "{model_name} {status}" }
-                    button { r#type: "button", disabled: is_busy, onclick: move |_| {
+                    if model == Model::N1 {
+                        select { "aria-label":"N1 连接方式", disabled:is_busy || linked, value:if usb_mode() {"usb"} else {"ble"},
+                            onchange:move |e| { let usb=e.value()=="usb"; usb_mode.set(usb); if usb {refresh_ports();} },
+                            option { value:"ble", "蓝牙" }
+                            option { value:"usb", "USB" }
+                        }
+                        if usb_mode() {
+                            select { class:"usb-port", title:"{usb_port}", "aria-label":"USB 串口", disabled:is_busy || linked, value:"{usb_port}", onchange:move |e| usb_port.set(e.value()),
+                                option { value:"", if usb_ports.read().is_empty() {"未发现 USB 串口"} else {"选择打印机端口"} }
+                                for (path,label) in usb_ports.read().iter() {
+                                    option { key:"{path}", value:"{path}", "{label}" }
+                                }
+                            }
+                            button { r#type:"button", disabled:is_busy, onclick:move |_| refresh_ports(), "刷新端口" }
+                        }
+                    }
+                    }
+                    if linked { span { class:"status good", "{model_name} · {transport} {status}" } }
+                    button { r#type: "button", disabled: is_busy || (!linked && model == Model::N1 && usb_mode() && usb_port.read().is_empty()), onclick: move |_| {
                         if busy() { return; }
                         busy.set(true);
                         let previous = connection.read().clone();
@@ -347,9 +421,22 @@ pub fn App() -> Element {
                         } else {
                             notice.set((format!("正在搜索并识别 {model_name}…"), false));
                             spawn(async move {
-                                match model.connect().await {
-                                    Ok(printer) => {
-                                        notice.set((format!("已连接并识别：{}。",printer.name()), false));
+                                let port = (model == Model::N1 && usb_mode()).then(|| usb_port());
+                                match model.connect(port).await {
+                                    Ok(mut printer) => {
+                                        let mut message=format!("已连接：{}",printer.name());
+                                        if let Device::N1(n1) = &mut printer {
+                                            match n1.read_stock_barcode().await {
+                                                Some(code) => {
+                                                    if let Some((_,media,_))=core::builtin_media().iter().find(|(m,_,codes)| *m==Model::N1 && codes.contains(&code.as_str())) {
+                                                        template.write().media=media.clone();
+                                                        message=format!("已识别耗材：{}（{code}）",media.name);
+                                                    } else {message=format!("耗材编码 {code} 未匹配规格，请核对标签规格。");}
+                                                }
+                                                None=>message.push_str("。未读到耗材编码，请核对标签规格。"),
+                                            }
+                                        }
+                                        notice.set((message,false));
                                         connection.set(Some(Arc::new(Mutex::new(printer))));
                                     }
                                     Err(e)=>notice.set((e,true)),
@@ -409,7 +496,7 @@ pub fn App() -> Element {
                                 } else {
                                     format!("aspect-ratio:{w}/{h};width:100%;max-width:{canvas_cap}px")
                                 },
-                                div { id:"label-canvas", class:"label-canvas", "aria-label":"标签画布",
+                                div { id:"label-canvas", class:"label-canvas", style:"{paper_outline}", "aria-label":"标签画布",
                                     "data-w":"{w}", "data-h":"{h}", "data-disabled":"{is_busy}",
                                     onresize:move |event| {
                                         if let Ok(size) = event.get_content_box_size() {
@@ -421,7 +508,7 @@ pub fn App() -> Element {
                                     }
                                     for (i,(item,valid)) in canvas_items.read().iter().map(|(item, art)| {
                                         let bounds = match drag().filter(|d| d.id == item.id) {
-                                            Some(d) => editor::transform(item, &media, d.mode, d.delta.0, d.delta.1),
+                                            Some(d) => editor::transform(item, d.mode, d.delta.0, d.delta.1),
                                             None => item.clone(),
                                         };
                                         (bounds, art.is_some())
@@ -433,7 +520,7 @@ pub fn App() -> Element {
                                             disabled:is_busy,
                                             "data-kind": match item.kind { Kind::Qr=>"qr", Kind::Image=>"image", _=>"other" }, "data-module":item.module_size.unwrap_or(0),
                                             "data-index":"{i}", "data-x":"{item.x}", "data-y":"{item.y}", "data-w":"{item.w}", "data-h":"{item.h}",
-                                            style:"left:{100.0 * (f64::from(item.x) - f64::from(feed_shift)) / f64::from(w)}%;top:{100.0 * f64::from(item.y) / f64::from(h)}%;width:{100.0 * f64::from(item.w.max(1)) / f64::from(w)}%;height:{100.0 * f64::from(item.h.max(1)) / f64::from(h)}%",
+                                            style:"left:{100.0 * (item.x as f64 - f64::from(feed_shift)) / f64::from(w)}%;top:{100.0 * item.y as f64 / f64::from(h)}%;width:{100.0 * f64::from(item.w.max(1)) / f64::from(w)}%;height:{100.0 * f64::from(item.h.max(1)) / f64::from(h)}%",
                                             onpointerdown:move |event| start_drag(event,i,Gesture::Move),
                                             onclick:move |_| field.set(i),
                                             onkeydown:move |event| {
@@ -458,7 +545,7 @@ pub fn App() -> Element {
                                 }
                                 if let Some(item) = &chosen {
                                     button { class:"element-remove canvas-remove danger", hidden:drag().is_some(), r#type:"button", disabled:is_busy,
-                                        style:"--corner-x:{100.0 * (f64::from(item.x) + f64::from(item.w) - f64::from(feed_shift)) / f64::from(w)}%;--corner-y:{100.0 * f64::from(item.y) / f64::from(h)}%",
+                                        style:"--corner-x:{100.0 * (item.x as f64 + f64::from(item.w) - f64::from(feed_shift)) / f64::from(w)}%;--corner-y:{100.0 * item.y as f64 / f64::from(h)}%",
                                         "aria-label":"删除选中的{kind_name(item.kind)}", title:"删除元素",
                                         onclick:move |_| remove_element(field()), "×"
                                     }
@@ -491,10 +578,24 @@ pub fn App() -> Element {
                     } else if let Some(reason) = validation.or_else(|| dot_preview.read().as_ref().err().cloned()) {
                         p { class: "error inline", "{reason}" }
                     }
+                    if !outside.read().is_empty() { p {class:"muted", "有 {outside.read().len()} 个元素超出可打印区域，实物可能印不全。"} }
+                    if let Some(reason)=overlap() {p {class:"muted", "{reason}"}}
                     section { class: "region",
                         div { class: "section-row",
                             h2 { "元素" }
                             div { class: "actions",
+                                button { r#type:"button", class:"danger", disabled:is_busy || outside.read().is_empty(),
+                                    onclick:move |_| {
+                                        if busy() {return;}
+                                        let ids=outside();
+                                        let mut draft=template.write();
+                                        let selected=draft.elements.get(field()).map(|item|item.id);
+                                        draft.elements.retain(|item|!ids.contains(&item.id));
+                                        let next=selected.and_then(|id| draft.elements.iter().position(|item|item.id == id))
+                                            .unwrap_or_else(||field().min(draft.elements.len().saturating_sub(1)));
+                                        field.set(next);
+                                    }, "删除越界元素"
+                                }
                                 for (kind,text,w,h) in [(Kind::Text,"新文字",136,24),(Kind::Qr,"N1",86,86),(Kind::Barcode,"0001",190,40)] {
                                     button { r#type: "button", disabled: is_busy, onclick: move |_| {
                                         let m = template.read().media.clone();
@@ -505,7 +606,7 @@ pub fn App() -> Element {
                                         let h = h.min(down).max(1);
                                         let x = 4.min(across.saturating_sub(w));
                                         let y = 4.min(down.saturating_sub(h));
-                                        template.write().elements.push(Field {id:uuid::Uuid::new_v4(), picture:None, kind, text: text.into(), x, y, w, h, font_size:(kind == Kind::Text).then_some(22), module_size:(kind != Kind::Text).then_some(2)});
+                                        template.write().elements.push(Field {id:uuid::Uuid::new_v4(), picture:None, kind, text: text.into(), x:x.into(), y:y.into(), w, h, font_size:(kind == Kind::Text).then_some(22), module_size:(kind != Kind::Text).then_some(2)});
                                         field.set(i);
                                     }, "加 {kind_name(kind)}" }
                                 }
@@ -563,7 +664,7 @@ pub fn App() -> Element {
                             }
                             div { class:"coords numeric",
                                 for (name, value, horizontal) in [("X", object.x, true), ("Y", object.y, false)] {
-                                    label { "{name} / 点", input { r#type:"number", min:"0", disabled:is_busy, value:"{value}", oninput:move |e| {
+                                    label { "{name} / 点", input { r#type:"number", disabled:is_busy, value:"{value}", oninput:move |e| {
                                         if let Ok(v) = e.value().parse() {
                                             edit_item(template,canvas_items,field(),|item| if horizontal { item.x = v; } else { item.y = v; });
                                         }
@@ -629,7 +730,8 @@ pub fn App() -> Element {
                                 option { key:"{i}", value:"{i}", "{entry.name}" }
                             }
                         } }
-                        span { class:"muted", "可打宽 {printable_width_dots} 点 · 走纸长 {printable_length_dots} 点" }
+                        span { class:"muted", "{layout_name} · {corner_name} · 可打区 {usable_length} × {printable_width_dots} 点" }
+                        if feed_margin > 0 { span { class:"muted", "走纸首尾各留 {feed_margin} mm" } }
                     }
                     section { class: "region",
                         h2 { "模板" }
@@ -650,7 +752,7 @@ pub fn App() -> Element {
                             }, "保存模板" }
                             button { r#type: "button", disabled: is_busy, onclick: move |_| {
                                 let media = template.read().media.clone();
-                                let draft = if model == Model::P2 { Template::p2_example(media) } else { Template { media, ..Template::default() } };
+                                let draft = Template {media, ..Template::default()};
                                 template.set(draft); field.set(0); page.set(0);
                                 notice.set(("已载入默认模板，已保存的模板不会被改动。".to_string(), false));
                             }, "载入默认" }

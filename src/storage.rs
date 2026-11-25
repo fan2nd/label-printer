@@ -171,7 +171,7 @@ mod tests {
     fn portable_roundtrip_preserves_media_and_unresolved_variables() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("模板.n1.json");
-        let mut t = Template::default();
+        let mut t = Template::example();
         t.media.name = "自定义标签".into();
         t.media.length_mm = 60;
         t.media.printable_length_dots = 480;
@@ -190,7 +190,7 @@ mod tests {
     fn imports_v1_templates_with_legacy_element_boxes() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("old.json");
-        let mut legacy = serde_json::to_value(Template::default()).unwrap();
+        let mut legacy = serde_json::to_value(Template::example()).unwrap();
         for field in legacy["elements"].as_array_mut().unwrap() {
             field.as_object_mut().unwrap().remove("id");
             field.as_object_mut().unwrap().remove("font_size");
@@ -220,7 +220,7 @@ mod tests {
         .unwrap();
         assert!(import_template(&file).unwrap_err().contains("25"));
 
-        let mut legacy = serde_json::to_value(Template::default()).unwrap();
+        let mut legacy = serde_json::to_value(Template::example()).unwrap();
         legacy.as_object_mut().unwrap().remove("media");
         let envelope = json!({"format": TEMPLATE_FORMAT, "version": 1, "template": legacy});
         fs::write(&file, envelope.to_string()).unwrap();
@@ -231,21 +231,21 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_layouts_roundtrip_without_becoming_printable() {
+    fn unfinished_layouts_roundtrip_and_render() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("draft.json");
-        let mut overlapping = Template::default();
+        let mut overlapping = Template::example();
         overlapping.elements[1].y = overlapping.elements[0].y;
-        let mut outside = Template::default();
-        outside.elements[0].x = outside.media.printable_length_dots;
+        let mut outside = Template::example();
+        outside.elements[0].x = outside.media.printable_length_dots.into();
         let empty = Template {
             elements: Vec::new(),
-            ..Template::default()
+            ..Template::example()
         };
         for draft in [empty, overlapping, outside] {
             export_template(&file, &draft).unwrap();
             assert_eq!(import_template(&file).unwrap(), draft);
-            assert!(crate::core::render_svg(&draft, &Default::default(), "0001").is_err());
+            assert!(crate::core::render_svg(&draft, &Default::default(), "0001").is_ok());
         }
     }
 
@@ -253,13 +253,14 @@ mod tests {
     fn invalid_geometry_never_replaces_existing_export() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("existing.n1.json");
-        let good = Template::default();
+        let good = Template::example();
         export_template(&file, &good).unwrap();
         let mut bad = good.clone();
         bad.elements[1].w = 0;
         assert!(export_template(&file, &bad).is_err());
         assert_eq!(import_template(&file).unwrap(), good);
-        bad.elements[1].w = u32::MAX;
+        bad.elements[1].w = 1;
+        bad.elements[1].x = i64::MAX;
         let envelope = json!({"format": TEMPLATE_FORMAT, "version": 1, "template": bad});
         fs::write(&file, envelope.to_string()).unwrap();
         assert!(import_template(&file).is_err());

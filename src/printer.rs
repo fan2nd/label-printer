@@ -1,4 +1,5 @@
-// NIIMBOT N1 native BLE transport and single-page print task.
+pub mod usb;
+// NIIMBOT N1 native USB serial and BLE transports and single-page print task.
 // Wire behavior adapted from iscarelli/niimbot-web-bluetooth 2.6.0 (MIT);
 // see THIRD-PARTY-NIIMBOT.txt and https://www.npmjs.com/package/niimbot-web-bluetooth/v/2.6.0.
 use btleplug::{
@@ -17,19 +18,28 @@ const SERVICE: Uuid = Uuid::from_u128(0xe781_0a71_73ae_499d_8c15_faa9_aef0_c3f2)
 const CHARACTERISTIC: Uuid = Uuid::from_u128(0xbef8_d6c9_9c21_4c9e_b632_bd58_c100_9f9f);
 
 const MODEL_ID: u16 = 3586;
-const HEIGHT: usize = 400;
-const STRIDE: usize = 12;
-pub const PAGE_BYTES: usize = HEIGHT * STRIDE;
 
-pub struct Printer {
+const STRIDE: usize = 12;
+
+struct Ble {
     // Keep the platform manager alive while the connection and events are in use.
     _manager: Manager,
     peripheral: Peripheral,
     characteristic: Characteristic,
     notify: Pin<Box<dyn Stream<Item = ValueNotification> + Send>>,
+    write_type: WriteType,
+}
+
+enum Link {
+    Ble(Ble),
+    Usb(usb::Usb),
+    Closed,
+}
+
+pub struct Printer {
+    link: Link,
     name: String,
     ready: bool,
-    write_type: WriteType,
     decoder: Decoder,
     replies: VecDeque<Reply>,
 }
@@ -101,12 +111,12 @@ fn model_id(reply: &Reply) -> Option<u16> {
 
 // Unbundled run-length packets, 200 runs max, each row contains 96 MSB-first dots.
 fn encode_rows(buf: &[u8]) -> Vec<Vec<u8>> {
-    assert_eq!(buf.len(), PAGE_BYTES);
+    let height = buf.len() / STRIDE;
     let mut out = Vec::new();
     let mut row = 0;
-    while row < HEIGHT {
+    while row < height {
         let current = &buf[row * STRIDE..(row + 1) * STRIDE];
-        let run = (1..200.min(HEIGHT - row))
+        let run = (1..200.min(height - row))
             .take_while(|next| current == &buf[(row + next) * STRIDE..(row + next + 1) * STRIDE])
             .count()
             + 1;
@@ -122,6 +132,32 @@ fn encode_rows(buf: &[u8]) -> Vec<Vec<u8>> {
         row += run;
     }
     out
+}
+
+fn tag_barcode(body: &[u8]) -> Option<&str> {
+    let (len, fields) = body.get(8..)?.split_first()?;
+    let (barcode, tail) = fields.split_at_checked(usize::from(*len))?;
+    let (serial_len, tail) = tail.split_first()?;
+    tail.get(usize::from(*serial_len)..)?.get(..5)?;
+    let barcode = std::str::from_utf8(barcode).ok()?;
+    (!barcode.is_empty() && !barcode.chars().any(char::is_control)).then_some(barcode)
+}
+
+impl Ble {
+    async fn write(&self, buf: &[u8]) -> Result<(), String> {
+        timeout(
+            Duration::from_secs(2),
+            self.peripheral
+                .write(&self.characteristic, buf, self.write_type),
+        )
+        .await
+        .map_err(|_| "写入打印机超时。".to_string())?
+        .map_err(|_| "蓝牙写入失败，请检查打印机连接。".to_string())?;
+        if self.write_type == WriteType::WithoutResponse {
+            sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
+    }
 }
 
 impl Printer {
@@ -216,14 +252,29 @@ impl Printer {
             .subscribe(&characteristic)
             .await
             .map_err(|_| "无法接收打印机通知。")?;
+        Self::identify(
+            Link::Ble(Ble {
+                _manager: manager,
+                peripheral,
+                characteristic,
+                notify,
+                write_type,
+            }),
+            name,
+        )
+        .await
+    }
+
+    pub async fn connect_usb(path: String) -> Result<Self, String> {
+        let name = format!("N1 USB ({path})");
+        Self::identify(Link::Usb(usb::Usb::open(path).await?), name).await
+    }
+
+    async fn identify(link: Link, name: String) -> Result<Self, String> {
         let mut this = Self {
-            _manager: manager,
-            peripheral,
-            characteristic,
-            notify,
+            link,
             name,
             ready: false,
-            write_type,
             decoder: Decoder::default(),
             replies: VecDeque::new(),
         };
@@ -263,7 +314,7 @@ impl Printer {
         let _ = this
             .exchange(0xdc, &[0x04], &[0xd9], Duration::from_secs(1))
             .await;
-        if !this.peripheral.is_connected().await.unwrap_or(false) {
+        if !this.link_connected().await {
             return Err("连接中断，请重新连接 N1。".into());
         }
         this.ready = true;
@@ -274,30 +325,43 @@ impl Printer {
         &self.name
     }
 
-    pub async fn is_connected(&self) -> bool {
-        self.ready && self.peripheral.is_connected().await.unwrap_or(false)
+    pub async fn read_stock_barcode(&mut self) -> Option<String> {
+        let reply = self
+            .exchange(0x1a, &[1], &[0x1b], Duration::from_secs(1))
+            .await
+            .ok()?;
+        tag_barcode(&reply.body).map(str::to_owned)
     }
 
-    pub async fn disconnect(&self) -> Result<(), String> {
-        timeout(Duration::from_secs(4), self.peripheral.disconnect())
+    pub async fn is_connected(&self) -> bool {
+        self.ready && self.link_connected().await
+    }
+
+    async fn link_connected(&self) -> bool {
+        match &self.link {
+            Link::Usb(port) => port.connected(),
+            Link::Ble(ble) => ble.peripheral.is_connected().await.unwrap_or(false),
+            Link::Closed => false,
+        }
+    }
+
+    pub async fn disconnect(&mut self) -> Result<(), String> {
+        let Link::Ble(ble) = std::mem::replace(&mut self.link, Link::Closed) else {
+            return Ok(());
+        };
+        timeout(Duration::from_secs(4), ble.peripheral.disconnect())
             .await
             .map_err(|_| "断开蓝牙连接超时。".to_string())?
             .map_err(|_| "无法断开蓝牙连接。".to_string())
     }
 
     async fn write(&self, buf: &[u8]) -> Result<(), String> {
-        timeout(
-            Duration::from_secs(2),
-            self.peripheral
-                .write(&self.characteristic, buf, self.write_type),
-        )
-        .await
-        .map_err(|_| "写入打印机超时。".to_string())?
-        .map_err(|_| "蓝牙写入失败，请检查打印机连接。".to_string())?;
-        if self.write_type == WriteType::WithoutResponse {
-            sleep(Duration::from_millis(10)).await;
-        }
-        Ok(())
+        let ble = match &self.link {
+            Link::Usb(port) => return port.send(buf.to_vec(), None).await.map(|_| ()),
+            Link::Ble(ble) => ble,
+            Link::Closed => return Err("打印机已断开连接。".into()),
+        };
+        ble.write(buf).await
     }
 
     async fn exchange(
@@ -307,15 +371,25 @@ impl Printer {
         expected: &[u8],
         limit: Duration,
     ) -> Result<Reply, String> {
+        let ble = match &mut self.link {
+            Link::Usb(port) => {
+                return port
+                    .send(frame(cmd, body), Some((expected.to_vec(), limit)))
+                    .await?
+                    .ok_or_else(|| "缺少 USB 回复。".into())
+            }
+            Link::Ble(ble) => ble,
+            Link::Closed => return Err("打印机已断开连接。".into()),
+        };
         // Drop already queued notifications so a previous job's status cannot count.
         self.replies.clear();
         self.decoder.bytes.clear();
         for _ in 0..128 {
-            if self.notify.next().now_or_never().flatten().is_none() {
+            if ble.notify.next().now_or_never().flatten().is_none() {
                 break;
             }
         }
-        self.write(&frame(cmd, body)).await?;
+        ble.write(&frame(cmd, body)).await?;
         let deadline = Instant::now() + limit;
         loop {
             while let Some(reply) = self.replies.pop_front() {
@@ -323,7 +397,7 @@ impl Printer {
                     return Ok(reply);
                 }
             }
-            let notice = timeout_at(deadline, self.notify.next())
+            let notice = timeout_at(deadline, ble.notify.next())
                 .await
                 .map_err(|_| "打印机未在预期时间内响应。".to_string())?
                 .ok_or_else(|| "打印机已断开连接。".to_string())?;
@@ -334,8 +408,8 @@ impl Printer {
     }
 
     pub async fn print_page(&mut self, buf: &[u8]) -> Result<(), String> {
-        if buf.len() != PAGE_BYTES {
-            return Err("打印点阵必须为 96 × 400。".into());
+        if buf.len() != 200 * STRIDE {
+            return Err("N1 打印点阵必须为 96 × 200。".into());
         }
         if !self.is_connected().await {
             return Err("请重新连接已识别的 N1。".into());
@@ -392,9 +466,10 @@ impl Printer {
         .await?;
         self.exchange(0x03, &[1], &[0x04], Duration::from_secs(1))
             .await?;
+        let [hi, lo] = ((buf.len() / STRIDE) as u16).to_be_bytes();
         self.exchange(
             0x13,
-            &[0x01, 0x90, 0, 0x60, 0, 1],
+            &[hi, lo, 0, 0x60, 0, 1],
             &[0x14],
             Duration::from_secs(2),
         )
@@ -445,7 +520,7 @@ mod tests {
 
     #[test]
     fn white_runs_and_mixed_rows_encode_absolute_row_and_popcount() {
-        let mut image = [0; PAGE_BYTES];
+        let mut image = [0; 400 * STRIDE];
         assert_eq!(
             encode_rows(&image),
             [frame(0x84, &[0, 0, 200]), frame(0x84, &[0, 200, 200])]
@@ -463,4 +538,33 @@ mod tests {
         );
         assert_eq!(output[3], frame(0x84, &[1, 3, 141]));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn decodes_stock_id_only_from_complete_tag() {
+    let body = b"12345678\x03012\x02SN\0\x64\0\x01\x01";
+    assert_eq!(tag_barcode(body), Some("012"));
+    for n in 0..body.len() {
+        assert_eq!(tag_barcode(&body[..n]), None);
+    }
+    assert_eq!(tag_barcode(&[0]), None);
+}
+
+#[test]
+#[cfg(test)]
+fn silver_roll_uses_200_feed_rows() {
+    use crate::{
+        core::{builtin_media, render_svg, Row, Template},
+        stock::Model,
+    };
+    let (_, stock, _) = builtin_media()
+        .iter()
+        .find(|(m, _, codes)| *m == Model::N1 && codes.contains(&"05262201"))
+        .unwrap();
+    assert_eq!(stock.canvas_size(), (200, 96));
+    let page = render_svg(&Template::n1_example(stock.clone()), &Row::new(), "0001").unwrap();
+    let packed = crate::raster::packed_n1(&page, stock).unwrap();
+    assert_eq!(packed.len(), 2400);
+    assert_eq!(encode_rows(&vec![0; 2400]), vec![frame(0x84, &[0, 0, 200])]);
 }

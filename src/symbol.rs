@@ -60,15 +60,15 @@ impl Symbol {
             // An undersized old box expands from its existing origin.
             ink.x = ink
                 .x
-                .checked_add(field.w.saturating_sub(ink.w) / 2)
+                .checked_add(i64::from(field.w.saturating_sub(ink.w) / 2))
                 .ok_or(OVERFLOW)?;
             ink.y = ink
                 .y
-                .checked_add(field.h.saturating_sub(ink.h) / 2)
+                .checked_add(i64::from(field.h.saturating_sub(ink.h) / 2))
                 .ok_or(OVERFLOW)?;
         }
-        ink.x.checked_add(ink.w).ok_or(OVERFLOW)?;
-        ink.y.checked_add(ink.h).ok_or(OVERFLOW)?;
+        ink.x.checked_add(i64::from(ink.w)).ok_or(OVERFLOW)?;
+        ink.y.checked_add(i64::from(ink.h)).ok_or(OVERFLOW)?;
         Ok(ink)
     }
 
@@ -82,8 +82,8 @@ impl Symbol {
                 for row in 0..qr.width() {
                     for col in 0..qr.width() {
                         if qr[(col, row)] == Color::Dark {
-                            let x = resolved.x + col as u32 * unit;
-                            let y = resolved.y + row as u32 * unit;
+                            let x = resolved.x + i64::from(col as u32 * unit);
+                            let y = resolved.y + i64::from(row as u32 * unit);
                             write!(svg, "M{x} {y}h{unit}v{unit}h-{unit}z").unwrap();
                         }
                     }
@@ -93,7 +93,7 @@ impl Symbol {
             Self::Barcode(bits) => {
                 for (col, &bit) in bits.iter().enumerate() {
                     if bit == 1 {
-                        let x = resolved.x + col as u32 * unit;
+                        let x = resolved.x + i64::from(col as u32 * unit);
                         write!(svg, "<rect x='{x}' y='{}' width='{unit}' height='{}' shape-rendering='crispEdges'/>", resolved.y, resolved.h).unwrap();
                     }
                 }
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn legacy_qr_preserves_centered_ink_and_fixed_modules_preserve_origin() {
         let code = encode(Kind::Qr, "A").unwrap();
-        let mut field = Template::default().elements[2].clone();
+        let mut field = Template::example().elements[2].clone();
         field.x = 3;
         field.y = 5;
         field.w = 62;
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn barcode_size_accounts_for_numeric_encoding_and_legacy_quiet_zones() {
         let code = encode(Kind::Barcode, "1234").unwrap();
-        let mut field = Template::default().elements[1].clone();
+        let mut field = Template::example().elements[1].clone();
         field.w = 300;
         field.module_size = None;
         let legacy = code.layout(&field).unwrap();
@@ -143,7 +143,7 @@ mod tests {
         field.module_size = Some(1);
         let fixed = code.layout(&field).unwrap();
         assert_eq!((fixed.x, fixed.w), (field.x, 57));
-        field.x = u32::MAX;
+        field.x = i64::MAX;
         assert!(code.layout(&field).is_err());
     }
 }

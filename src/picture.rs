@@ -171,7 +171,7 @@ mod tests {
         assert!(dither[2..8].contains(&true) && dither[2..8].contains(&false));
         pic.invert = true;
         assert!(mask(pic).iter().zip(&dither).all(|(a, b)| a != b));
-        let scaled = editor::transform(&field, &media, editor::Gesture::Resize, 8, 4);
+        let scaled = editor::transform(&field, editor::Gesture::Resize, 8, 4);
         assert_eq!((scaled.w, scaled.h), (16, 12));
         let template = Template {
             name: "测试".into(),

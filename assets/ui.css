@@ -119,3 +119,7 @@ dialog.native-dialog {position:fixed; inset:0; margin:auto; height:max-content; 
 .image-settings label:first-child {flex:1;min-width:120px}
 .image-settings label:has(input[type=checkbox]) {display:flex;align-items:center;gap:var(--s1)}
 .image-settings input[type=checkbox] {width:auto; min-height:0}
+
+.bar .actions {max-width:100%;min-width:0}
+.bar select {width:auto;max-width:100%}
+.bar .usb-port {max-width:min(28ch,100%);text-overflow:ellipsis}

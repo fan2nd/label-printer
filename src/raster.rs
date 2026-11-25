@@ -62,33 +62,37 @@ pub(crate) fn ink_mask(svg: &str) -> Result<Vec<bool>, String> {
 // The N1 needs a one-dot feed correction measured on this model.
 pub(crate) const N1_FEED_SHIFT: u32 = 1;
 
-pub fn packed_n1(svg: &str) -> Result<Vec<u8>, String> {
-    pack_rotated(svg, 400, 96, 96, N1_FEED_SHIFT as usize)
+pub fn packed_n1(svg: &str, media: &Media) -> Result<Vec<u8>, String> {
+    if !media.is_known_n1() {
+        return Err("N1 不支持此标签规格。".into());
+    }
+    pack_rotated(svg, media, 96, N1_FEED_SHIFT as usize)
 }
 
 pub fn packed_p2(svg: &str, media: &Media) -> Result<Vec<u8>, String> {
     if !media.supports_p2() {
         return Err("P2 纸宽最多 57 mm，有效打印宽度最多 384 点，请检查标签规格。".into());
     }
-    let (along, across) = media.canvas_size();
-    pack_rotated(svg, along, across, P2_HEAD_DOTS, 0)
+    pack_rotated(svg, media, P2_HEAD_DOTS, 0)
 }
 
 /// Unsupported stock is still editable in its native printable-dot coordinates.
 pub(crate) fn stock_preview_png(svg: &str, media: &Media) -> Result<String, String> {
     media.validate()?;
-    let (along, across) = media.canvas_size();
-    let packed = pack_rotated(svg, along, across, across, 0)?;
+    let across = media.printable_width_dots;
+    let packed = pack_rotated(svg, media, across, 0)?;
     preview_png(&packed, media, across)
 }
 
 fn pack_rotated(
     svg: &str,
-    along: u32,
-    across: u32,
+    media: &Media,
     head_dots: u32,
     skip_feed_dots: usize,
 ) -> Result<Vec<u8>, String> {
+    media.validate()?;
+    let (along, across) = media.canvas_size();
+    let cut = media.effective_cut();
     let opts = Options {
         fontdb: fonts(),
         ..Default::default()
@@ -116,7 +120,15 @@ fn pack_rotated(
             let i = 4 * (source_y * along + source_x);
             let dark =
                 299 * u32::from(px[i]) + 587 * u32::from(px[i + 1]) + 114 * u32::from(px[i + 2]);
-            if px[i + 3] > 32 && dark < 128_000 {
+            if px[i + 3] > 32
+                && dark < 128_000
+                && cut.inside_die(
+                    (source_x - skip_feed_dots) as u32,
+                    source_y as u32,
+                    along as u32,
+                    across as u32,
+                )
+            {
                 rotated[(source_x - skip_feed_dots) * stride + x / 8] |= 0x80 >> (x % 8);
             }
         }
@@ -134,14 +146,27 @@ pub fn preview_png(packed: &[u8], media: &Media, head_dots: u32) -> Result<Strin
         return Err("打印点阵与标签规格不匹配，无法预览。".into());
     }
     let left_margin = (head_dots - across) / 2;
-    let png_stride = along.div_ceil(8) as usize;
+    let cut = media.effective_cut();
+    let shaped = cut.feed_margin_mm > 0 || cut.radius_dots > 0 || !cut.regions_dots.is_empty();
+    let bits = if shaped { 2 } else { 1 };
+    let png_stride = (along * bits).div_ceil(8) as usize;
     // In 1-bit grayscale PNG, a set bit is white; on the head, it is black.
     let mut pixels = vec![0xff; png_stride * across as usize];
     for (y, png_row) in pixels.chunks_exact_mut(png_stride).enumerate() {
         let head_x = (left_margin + across - 1) as usize - y;
         let head_bit = 0x80 >> (head_x % 8);
         for (x, head_row) in packed.chunks_exact(head_stride as usize).enumerate() {
-            if head_row[head_x / 8] & head_bit != 0 {
+            let black = head_row[head_x / 8] & head_bit != 0;
+            if shaped {
+                let value = if black {
+                    0
+                } else if !cut.contains(x as u32, y as u32, along, across) {
+                    2
+                } else {
+                    3
+                };
+                png_row[x / 4] &= !((3 - value) << (6 - 2 * (x % 4)));
+            } else if black {
                 png_row[x / 8] &= !(0x80 >> (x % 8));
             }
         }
@@ -151,7 +176,11 @@ pub fn preview_png(packed: &[u8], media: &Media, head_dots: u32) -> Result<Strin
     {
         let mut encoder = png::Encoder::new(&mut bytes, along, across);
         encoder.set_color(png::ColorType::Grayscale);
-        encoder.set_depth(png::BitDepth::One);
+        encoder.set_depth(if shaped {
+            png::BitDepth::Two
+        } else {
+            png::BitDepth::One
+        });
         let mut writer = encoder.write_header().map_err(|_| "无法生成点阵预览。")?;
         writer
             .write_image_data(&pixels)
@@ -166,9 +195,9 @@ mod tests {
     use super::*;
     #[test]
     fn rotate_shift_and_pack_coordinates() {
-        let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' width='400' height='96'><rect width='400' height='96' fill='white'/><rect x='1' y='95' width='1' height='1'/><rect x='9' y='0' width='1' height='1'/><rect x='0' y='92' width='1' height='1'/></svg>"#;
-        let out = packed_n1(svg).unwrap();
-        assert_eq!(out.len(), 4800);
+        let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' width='200' height='96'><rect width='200' height='96' fill='white'/><rect x='1' y='95' width='1' height='1'/><rect x='9' y='0' width='1' height='1'/><rect x='0' y='92' width='1' height='1'/></svg>"#;
+        let out = packed_n1(svg, &Media::default()).unwrap();
+        assert_eq!(out.len(), 2400);
         assert_eq!(out[0], 0x80);
         assert_eq!(out[8 * 12 + 11], 1);
         assert_eq!(out.into_iter().map(u8::count_ones).sum::<u32>(), 2);
@@ -186,9 +215,9 @@ mod tests {
         assert_eq!(page[48 + 1], 0x80);
         assert_eq!(page[399 * 48 + 47], 0x01);
         assert_eq!(page.into_iter().map(u8::count_ones).sum::<u32>(), 3);
-        assert!(packed_n1(svg).is_err());
+        assert!(packed_n1(svg, &Media::default()).is_err());
         assert!(packed_p2(
-            "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='96'/>",
+            "<svg xmlns='http://www.w3.org/2000/svg' width='200' height='96'/>",
             &Media::p2()
         )
         .is_err());
@@ -225,15 +254,15 @@ mod tests {
         let mut data = vec![0; reader.output_buffer_size()];
         let frame = reader.next_frame(&mut data).unwrap();
         assert_eq!((frame.width, frame.height), size);
-        assert_eq!(
-            (frame.color_type, frame.bit_depth),
-            (png::ColorType::Grayscale, png::BitDepth::One)
-        );
+        assert_eq!(frame.color_type, png::ColorType::Grayscale);
+        let bits = frame.bit_depth as u32;
+        assert!(matches!(bits, 1 | 2));
         let mut ink = Vec::new();
         for y in 0..frame.height {
             for x in 0..frame.width {
-                let byte = data[y as usize * frame.line_size + (x / 8) as usize];
-                if byte & (0x80 >> (x % 8)) == 0 {
+                let bit = x * bits;
+                let byte = data[y as usize * frame.line_size + (bit / 8) as usize];
+                if (byte >> (8 - bits - bit % 8)) & ((1 << bits) - 1) == 0 {
                     ink.push((x, y));
                 }
             }
@@ -244,14 +273,14 @@ mod tests {
     #[test]
     fn n1_preview_includes_feed_correction_and_last_blank_column() {
         let media = Media::default();
-        let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' width='400' height='96'>
+        let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' width='200' height='96'>
             <rect x='0' y='17' width='1' height='1'/>
             <rect x='1' y='95' width='1' height='1'/>
-            <rect x='399' y='0' width='1' height='1'/>
+            <rect x='199' y='0' width='1' height='1'/>
         </svg>"#;
-        let packed = packed_n1(svg).unwrap();
+        let packed = packed_n1(svg, &Media::default()).unwrap();
         let url = preview_png(&packed, &media, 96).unwrap();
-        assert_eq!(preview_dots(&url, (400, 96)), [(398, 0), (0, 95)]);
+        assert_eq!(preview_dots(&url, (200, 96)), [(198, 0), (0, 95)]);
     }
 
     #[test]
@@ -275,6 +304,7 @@ mod tests {
     fn unsupported_but_valid_stock_displays_at_its_own_dot_coordinates() {
         use crate::device::Model;
         let mut media = Media::default();
+        media.cut = Default::default();
         media.width_mm = 60;
         media.printable_length_dots = 15;
         media.printable_width_dots = 11;
@@ -294,9 +324,56 @@ mod tests {
 
     #[test]
     fn different_media_and_invalid_xml_block_raster() {
-        assert!(packed_n1("<svg>").is_err());
-        assert!(
-            packed_n1("<svg xmlns='http://www.w3.org/2000/svg' width='399' height='96'/>").is_err()
-        );
+        assert!(packed_n1("<svg>", &Media::default()).is_err());
+        assert!(packed_n1(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='399' height='96'/>",
+            &Media::default()
+        )
+        .is_err());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn silver_feed_preserves_ink_in_both_margins_and_shades_unused_margin() {
+    use crate::core::builtin_media;
+    let (_, media, _) = builtin_media()
+        .iter()
+        .find(|(_, _, ids)| ids.contains(&"05262201"))
+        .unwrap();
+    assert_eq!(media.cut.combined, Some(false));
+    assert_eq!(media.cut.rounded, Some(true));
+    let solid="<svg xmlns='http://www.w3.org/2000/svg' width='200' height='96'><rect width='200' height='96'/></svg>";
+    let ink = packed_n1(solid, media).unwrap();
+    assert_eq!(ink.len(), 200 * 12);
+    for (y, row) in ink.chunks_exact(12).enumerate() {
+        assert!(row.iter().all(|&b| b == if y < 199 { 255 } else { 0 }));
+    }
+    let url = preview_png(&ink, media, 96).unwrap();
+    let png = STANDARD.decode(url.split_once(',').unwrap().1).unwrap();
+    let mut reader = png::Decoder::new(png.as_slice()).read_info().unwrap();
+    let mut bytes = vec![0; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut bytes).unwrap();
+    assert_eq!(frame.bit_depth, png::BitDepth::Two);
+    // The final dot is blank after the N1 one-dot feed correction.
+    for row in bytes.chunks_exact(50) {
+        assert_eq!(&row[..49], &[0; 49]);
+        assert_eq!(row[49], 0b0000_0010);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn die_cut_rejects_gap_and_rounded_corners() {
+    let cut = crate::stock::Cut {
+        rounded: Some(true),
+        combined: Some(true),
+        radius_dots: 4,
+        regions_dots: vec![[0, 0, 12, 12], [16, 0, 12, 12]],
+        ..Default::default()
+    };
+    assert!(cut.validate(28, 12).is_ok());
+    assert!(!cut.contains(0, 0, 28, 12));
+    assert!(!cut.contains(14, 6, 28, 12));
+    assert!(cut.contains(22, 6, 28, 12));
 }

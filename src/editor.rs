@@ -1,4 +1,4 @@
-use crate::core::{Field, Kind, Media};
+use crate::core::{Field, Kind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gesture {
@@ -7,20 +7,21 @@ pub enum Gesture {
 }
 
 /// Operates on this record's resolved geometry (including its symbol module size).
-pub fn transform(field: &Field, media: &Media, mode: Gesture, dx: i32, dy: i32) -> Field {
-    let (width, height) = media.canvas_size();
+pub fn transform(field: &Field, mode: Gesture, dx: i32, dy: i32) -> Field {
+    let width = crate::core::MAX_MEDIA_LENGTH_DOTS;
+    let height = crate::core::MAX_MEDIA_WIDTH_DOTS;
     let mut next = field.clone();
     let adjust = |v: u32, d: i32, min: u32, max: u32| {
         (i64::from(v) + i64::from(d)).clamp(i64::from(min), i64::from(max.max(min))) as u32
     };
     match mode {
         Gesture::Move => {
-            next.x = adjust(field.x, dx, 0, width.saturating_sub(field.w));
-            next.y = adjust(field.y, dy, 0, height.saturating_sub(field.h));
+            next.x = field.x.saturating_add(i64::from(dx));
+            next.y = field.y.saturating_add(i64::from(dy));
         }
         Gesture::Resize if field.kind == Kind::Image => {
-            next.w = adjust(field.w, dx, 1, width.saturating_sub(field.x));
-            next.h = adjust(field.h, dy, 1, height.saturating_sub(field.y));
+            next.w = adjust(field.w, dx, 1, width);
+            next.h = adjust(field.h, dy, 1, height);
         }
         Gesture::Resize if field.kind != Kind::Text => {
             if let Some(unit) = field.module_size.filter(|unit| *unit > 0) {
@@ -32,9 +33,9 @@ pub fn transform(field: &Field, media: &Media, mode: Gesture, dx: i32, dy: i32) 
                     dx
                 };
                 if delta != 0 {
-                    let mut limit = width.saturating_sub(field.x);
+                    let mut limit = width;
                     if square {
-                        limit = limit.min(height.saturating_sub(field.y));
+                        limit = limit.min(height);
                     }
                     let dots = adjust(field.w, delta, 1, limit);
                     let scaled =
@@ -48,7 +49,7 @@ pub fn transform(field: &Field, media: &Media, mode: Gesture, dx: i32, dy: i32) 
                 }
             }
             if field.kind == Kind::Barcode && dy != 0 {
-                next.h = adjust(field.h, dy, 1, height.saturating_sub(field.y));
+                next.h = adjust(field.h, dy, 1, height);
             }
         }
         Gesture::Resize => {}
@@ -75,28 +76,21 @@ mod tests {
     }
 
     #[test]
-    fn move_clamps_to_the_visible_element_and_preserves_dimensions() {
-        let f = transform(
-            &field(Kind::Text),
-            &Media::default(),
-            Gesture::Move,
-            1000,
-            -50,
-        );
-        assert_eq!((f.x, f.y, f.w, f.h), (316, 0, 84, 84));
+    fn move_past_edges_preserves_dimensions() {
+        let f = transform(&field(Kind::Text), Gesture::Move, 1000, -50);
+        assert_eq!((f.x, f.y, f.w, f.h), (1016, -42, 84, 84));
     }
 
     #[test]
     fn corner_resize_snaps_codes_to_whole_modules() {
-        let media = Media::p2();
-        let qr = transform(&field(Kind::Qr), &media, Gesture::Resize, 20, 38);
+        let qr = transform(&field(Kind::Qr), Gesture::Resize, 20, 38);
         assert_eq!(
             (qr.x, qr.y, qr.w, qr.h, qr.module_size),
             (16, 8, 126, 126, Some(6))
         );
-        let bars = transform(&field(Kind::Barcode), &media, Gesture::Resize, -20, -10);
+        let bars = transform(&field(Kind::Barcode), Gesture::Resize, -20, -10);
         assert_eq!((bars.w, bars.h, bars.module_size), (63, 74, Some(3)));
         let text = field(Kind::Text);
-        assert_eq!(transform(&text, &media, Gesture::Resize, 40, 40), text);
+        assert_eq!(transform(&text, Gesture::Resize, 40, 40), text);
     }
 }

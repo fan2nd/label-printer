@@ -13,7 +13,7 @@ impl Model {
 
     pub fn supported_stock(self) -> &'static str {
         match self {
-            Self::N1 => "14 × 50 mm（96 × 400 点）",
+            Self::N1 => "12 × 25 mm 标签",
             Self::P2 => "纸宽至多 57 mm、可印宽至多 384 点的间隙标签",
         }
     }
@@ -30,7 +30,7 @@ impl Model {
             return Err(format!("请为 {} 选择支持的标签规格。", self.name()));
         }
         match self {
-            Self::N1 => raster::packed_n1(svg),
+            Self::N1 => raster::packed_n1(svg, media),
             Self::P2 => raster::packed_p2(svg, media),
         }
     }
@@ -52,10 +52,11 @@ impl Model {
         raster::preview_png(&packed, media, self.head_dots())
     }
 
-    pub async fn connect(self) -> Result<Device, String> {
-        match self {
-            Self::N1 => printer::Printer::connect().await.map(Device::N1),
-            Self::P2 => p2::Printer::connect().await.map(Device::P2),
+    pub async fn connect(self, usb_port: Option<String>) -> Result<Device, String> {
+        match (self, usb_port) {
+            (Self::N1, Some(port)) => printer::Printer::connect_usb(port).await.map(Device::N1),
+            (Self::N1, None) => printer::Printer::connect().await.map(Device::N1),
+            (Self::P2, _) => p2::Printer::connect().await.map(Device::P2),
         }
     }
 }
@@ -87,7 +88,7 @@ impl Device {
         }
     }
 
-    pub async fn disconnect(&self) -> Result<(), String> {
+    pub async fn disconnect(&mut self) -> Result<(), String> {
         match self {
             Self::N1(device) => device.disconnect().await,
             Self::P2(device) => device.disconnect().await,

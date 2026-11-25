@@ -15,6 +15,10 @@ use stock::{dots, Model, MAX_MEDIA_LENGTH_DOTS};
 #[serde(deny_unknown_fields)]
 struct Label {
     name: Option<String>,
+    #[serde(default)]
+    barcodes: Vec<String>,
+    #[serde(default)]
+    cut: stock::Cut,
     width_mm: u16,
     length_mm: u16,
 }
@@ -32,7 +36,15 @@ fn main() {
             .filter(|e| !e.is_empty())
             .unwrap_or_else(|| panic!("labels.yaml 中 {model:?} 至少需要一个默认规格"));
         let mut names = BTreeSet::new();
+        let mut barcode_set = BTreeSet::new();
         for label in entries {
+            for code in &label.barcodes {
+                assert!(
+                    !code.trim().is_empty() && barcode_set.insert(code),
+                    "labels.yaml 中 {model:?} 的耗材编码为空或重复：{code}"
+                );
+            }
+            let barcodes = &label.barcodes;
             let (w, h) = (label.width_mm, label.length_mm);
             let name = label
                 .name
@@ -48,7 +60,11 @@ fn main() {
                 width > 0 && (1..=MAX_MEDIA_LENGTH_DOTS).contains(&length),
                 "labels.yaml 中 {name} 的纸张尺寸超出范围"
             );
-            writeln!(generated,"(Model::{model:?}, Media {{ name: {name:?}.into(), width_mm: {w}, length_mm: {h}, printable_width_dots: {width}, printable_length_dots: {length} }}),").unwrap();
+            let cut = &label.cut;
+            cut.validate(length, width)
+                .unwrap_or_else(|e| panic!("labels.yaml {name}: {e}"));
+            let cut=format!("crate::stock::Cut {{rounded:{:?},combined:{:?},radius_dots:{},feed_margin_mm:{},regions_dots:vec!{:?} }}",cut.rounded,cut.combined,cut.radius_dots,cut.feed_margin_mm,cut.regions_dots);
+            writeln!(generated,"(Model::{model:?}, Media {{ cut:{cut}, name: {name:?}.into(), width_mm: {w}, length_mm: {h}, printable_width_dots: {width}, printable_length_dots: {length} }}, &{barcodes:?}[..]),").unwrap();
         }
     }
     generated.push(']');
