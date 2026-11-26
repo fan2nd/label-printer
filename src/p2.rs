@@ -26,29 +26,51 @@ const STRIDE: usize = 48;
 const MAX_ROWS: usize = 1600;
 
 // One die-cut label per job. Each entry is a separate, short GATT message.
-const SETUP: [&[u8]; 5] = [
+pub const DEFAULT_DENSITY: u8 = 1;
+const SETUP: [&[u8]; 4] = [
     &[0x1f, 0x20, 2, 0, 1, 0x88], // start page 1
     &[0x1f, 0x27, 1, STRIDE as u8, 0x88],
     &[0x1f, 0x42, 1, 2, 0x88],          // gap media
     &[0x1f, 0x45, 2, 0xff, 0xff, 0x88], // automatic gap length
-    &[0x1f, 0x43, 1, 8, 0x88],          // darkness
 ];
 
-fn bitmap_messages(pixels: &[u8]) -> Result<impl Iterator<Item = Vec<u8>> + '_, String> {
+fn density_command(level: u8) -> Result<[u8; 5], String> {
+    if !(1..=15).contains(&level) {
+        return Err("P2 打印浓度须为 1～15。".into());
+    }
+    Ok([0x1f, 0x43, 1, level - 1, 0x88])
+}
+
+fn validate_bitmap(pixels: &[u8]) -> Result<(), String> {
     if pixels.is_empty() || pixels.len() % STRIDE != 0 || pixels.len() > STRIDE * MAX_ROWS {
         return Err("P2 图像尺寸无效，请检查标签规格。".into());
     }
-    let rows = pixels.chunks_exact(STRIDE);
-    let height = rows.len();
-    Ok(rows.enumerate().map(move |(index, row)| {
-        let mut message = Vec::with_capacity(4 + STRIDE + 1);
-        message.extend_from_slice(&[0x1f, 0x2b, 0, STRIDE as u8]);
-        message.extend_from_slice(row);
-        if index + 1 == height {
-            message.push(0x0c);
+    Ok(())
+}
+
+// ESC J advances blank raster lines;
+// 1F 2B takes a leading byte offset and pads the remainder of the row white.
+fn bitmap_messages(pixels: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    validate_bitmap(pixels)?;
+    let mut rows = pixels.chunks_exact(STRIDE).peekable();
+    let mut messages = Vec::new();
+    while let Some(row) = rows.next() {
+        if let Some(first) = row.iter().position(|&byte| byte != 0) {
+            let last = row.iter().rposition(|&byte| byte != 0).unwrap();
+            let ink = &row[first..=last];
+            let mut message = vec![0x1f, 0x2b, first as u8, ink.len() as u8];
+            message.extend_from_slice(ink);
+            messages.push(message);
+        } else {
+            let mut blank = 1u8;
+            while blank < u8::MAX && rows.next_if(|r| r.iter().all(|&byte| byte == 0)).is_some() {
+                blank += 1;
+            }
+            messages.push(vec![0x1b, 0x4a, blank]);
         }
-        message
-    }))
+    }
+    messages.last_mut().unwrap().push(0x0c);
+    Ok(messages)
 }
 
 fn is_p2(name: &str) -> bool {
@@ -190,17 +212,20 @@ impl Printer {
         .await
         .map_err(|_| "P2 写入超时。")?
         .map_err(|_| "无法向 P2 写入打印数据。")?;
-        sleep(Duration::from_millis(5)).await;
+        if matches!(self.mode, WriteType::WithoutResponse) {
+            sleep(Duration::from_millis(5)).await;
+        }
         Ok(())
     }
 
-    pub async fn print_page(&mut self, pixels: &[u8]) -> Result<(), String> {
+    pub async fn print_page(&mut self, pixels: &[u8], density: u8) -> Result<(), String> {
+        let density = density_command(density)?;
         let rows = bitmap_messages(pixels)?;
         if !self.is_connected().await {
             return Err("P2 已断开，请重新连接。".into());
         }
         let send = async {
-            for command in SETUP {
+            for command in SETUP.into_iter().chain([density.as_slice()]) {
                 self.write(command).await?;
             }
             for row in rows {
@@ -227,6 +252,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn density_levels_encode_the_default_and_both_limits() {
+        for (level, value) in [(DEFAULT_DENSITY, 0), (9, 8), (15, 14)] {
+            assert_eq!(
+                density_command(level).unwrap(),
+                [0x1f, 0x43, 1, value, 0x88]
+            );
+        }
+        assert!(density_command(0).is_err());
+        assert!(density_command(16).is_err());
+    }
+
+    #[test]
     fn p2_name_excludes_other_models_using_same_service() {
         for name in ["P2", "P2-123", "P2_A"] {
             assert!(is_p2(name));
@@ -237,24 +274,48 @@ mod tests {
     }
 
     #[test]
+    fn sparse_rows_preserve_head_position_and_feed_length() {
+        let mut page = vec![0; STRIDE * 260];
+        page[256 * STRIDE + 3] = 0x81;
+        page[256 * STRIDE + 5] = 0x40;
+        let encoded = bitmap_messages(&page).unwrap();
+        assert_eq!(
+            encoded,
+            [
+                vec![0x1b, 0x4a, 255],
+                vec![0x1b, 0x4a, 1],
+                vec![0x1f, 0x2b, 3, 3, 0x81, 0, 0x40],
+                vec![0x1b, 0x4a, 3, 0x0c],
+            ]
+        );
+        let full = vec![0xff; STRIDE];
+        assert_eq!(
+            bitmap_messages(&full).unwrap(),
+            [[&[0x1f, 0x2b, 0, 48][..], full.as_slice(), &[0x0c]].concat()]
+        );
+        assert_eq!(
+            bitmap_messages(&[0; STRIDE]).unwrap(),
+            [vec![0x1b, 0x4a, 1, 0x0c]]
+        );
+    }
+
+    #[test]
     fn bitmap_rows_keep_dot_order_and_finalize_only_the_last_message() {
         let mut pixels = [0u8; 2 * STRIDE];
         pixels[0] = 0x80;
         pixels[pixels.len() - 1] = 0x01;
-        let messages: Vec<_> = bitmap_messages(&pixels).unwrap().collect();
+        let messages: Vec<_> = bitmap_messages(&pixels).unwrap();
         assert_eq!(SETUP[1], [0x1f, 0x27, 1, 48, 0x88]);
-        assert_eq!(&messages[0][..5], &[0x1f, 0x2b, 0, 48, 0x80]);
-        assert_eq!(messages[0].len(), 52);
-        assert_eq!(&messages[1][51..], &[0x01, 0x0c]);
+        assert_eq!(messages[0], [0x1f, 0x2b, 0, 1, 0x80]);
+
+        assert_eq!(messages[1], [0x1f, 0x2b, 47, 1, 0x01, 0x0c]);
         assert_eq!(messages.len(), 2);
         assert!(bitmap_messages(&[]).is_err());
         assert!(bitmap_messages(&[0; STRIDE + 1]).is_err());
         assert!(bitmap_messages(&vec![0; STRIDE * (MAX_ROWS + 1)]).is_err());
         assert_eq!(
-            bitmap_messages(&vec![0; STRIDE * MAX_ROWS])
-                .unwrap()
-                .count(),
-            MAX_ROWS
+            bitmap_messages(&vec![0; STRIDE * MAX_ROWS]).unwrap().len(),
+            MAX_ROWS.div_ceil(255)
         );
     }
 }

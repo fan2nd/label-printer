@@ -76,6 +76,21 @@ fn budget(device: &HidDevice) -> Result<usize, String> {
     Ok(if units == 1 { 1000 } else { units * 500 })
 }
 
+// Query the printer only between commands. Within a granted byte budget the
+// HID reports carry a continuous stream, even across raster row boundaries.
+fn next_block(messages: &[Vec<u8>], available: usize, block: &mut Vec<u8>) -> usize {
+    block.clear();
+    let mut consumed = 0;
+    for message in messages {
+        if message.len() > available - block.len() {
+            break;
+        }
+        block.extend_from_slice(message);
+        consumed += 1;
+    }
+    consumed
+}
+
 pub struct Printer {
     name: String,
     device: Option<HidDevice>,
@@ -121,30 +136,34 @@ impl Printer {
     pub fn disconnect(&mut self) {
         self.device.take();
     }
-    pub async fn print_page(&mut self, page: &[u8]) -> Result<(), String> {
+    pub async fn print_page(&mut self, page: &[u8], density: u8) -> Result<(), String> {
         let rows = super::bitmap_messages(page)?;
         let messages: Vec<_> = super::SETUP
             .iter()
             .map(|m| m.to_vec())
+            .chain([super::density_command(density)?.to_vec()])
             .chain(rows)
             .collect();
         let device = self.device.take().ok_or("P2 USB 已断开。")?;
         self.device = Some(
             tokio::task::spawn_blocking(move || -> Result<_, String> {
-                let mut available = 0;
-                for message in messages {
+                let mut pending = messages.as_slice();
+                let mut block = Vec::new();
+                while let Some(first) = pending.first() {
                     let deadline = Instant::now() + Duration::from_secs(30);
-                    while available < message.len() {
-                        available = budget(&device)?;
-                        if available < message.len() {
-                            if Instant::now() >= deadline {
-                                return Err("P2 USB 缓冲区持续忙碌。".into());
-                            }
-                            std::thread::sleep(Duration::from_millis(100));
+                    let available = loop {
+                        let available = budget(&device)?;
+                        if available >= first.len() {
+                            break available;
                         }
-                    }
-                    write(&device, &message)?;
-                    available -= message.len();
+                        if Instant::now() >= deadline {
+                            return Err("P2 USB 缓冲区持续忙碌。".into());
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    };
+                    let count = next_block(pending, available, &mut block);
+                    write(&device, &block)?;
+                    pending = &pending[count..];
                 }
                 Ok(device)
             })
@@ -157,6 +176,18 @@ impl Printer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usb_blocks_respect_credit_and_preserve_the_command_stream() {
+        let commands = [vec![1; 52], vec![2; 52], vec![3; 4]];
+        let mut block = Vec::new();
+        assert_eq!(super::next_block(&commands, 51, &mut block), 0);
+        assert_eq!(super::next_block(&commands, 104, &mut block), 2);
+        assert_eq!(block, commands[..2].concat());
+        assert_eq!(block.chunks(super::MAX_PAYLOAD).count(), 2);
+        assert_eq!(super::next_block(&commands[2..], 4, &mut block), 1);
+        assert_eq!(block, commands[2]);
+    }
+
     #[test]
     fn hid_report_carries_only_declared_bytes() {
         let r = super::report(&[0x1f, 0x79, 0, 0x86]);

@@ -51,6 +51,9 @@ enum Command {
         /// N1 USB 串口路径，用 ports 查看
         #[arg(long)]
         port: Option<String>,
+        /// P2 打印浓度（1～15，默认 1）
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=15))]
+        density: Option<u8>,
         #[command(flatten)]
         content: Content,
     },
@@ -221,9 +224,13 @@ pub fn run() -> Result<(), String> {
             model,
             transport,
             port,
+            density,
             content,
         } => {
             let (svg, media) = content.render(model)?;
+            if density.is_some() && model != Model::P2 {
+                return Err("--density 仅适用于 P2。".into());
+            }
             match (model, transport, port.is_some()) {
                 (Model::N1, Transport::Usb, true)
                 | (Model::P2, Transport::Usb, false)
@@ -239,7 +246,9 @@ pub fn run() -> Result<(), String> {
                     let mut device = model
                         .connect(matches!(transport, Transport::Usb), port)
                         .await?;
-                    let sent = device.print_page(&page).await;
+                    let sent = device
+                        .print_page(&page, density.unwrap_or(crate::p2::DEFAULT_DENSITY))
+                        .await;
                     let closed = device.disconnect().await;
                     sent?;
                     println!("{} 已发送 1 张。", model.name());

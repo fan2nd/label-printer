@@ -259,6 +259,7 @@ pub fn App() -> Element {
     let mut copies = use_signal(|| "1".to_owned());
     let mut confirm_print = use_signal(|| None::<PrintScope>);
     let mut range_label = use_signal(|| None::<crate::raster::RangeLabel>);
+    let mut p2_density = use_signal(|| crate::p2::DEFAULT_DENSITY);
     let mut printing = use_signal(|| false);
     let mut stop_requested = use_signal(|| false);
 
@@ -608,6 +609,11 @@ pub fn App() -> Element {
                         span {class:if linked {"device-dot connected"} else {"device-dot"}}
                         if linked { "{model_name} · {transport}" } else { "连接打印机" }
                     }
+                    if model == Model::P2 {
+                        label { class:"printer-density", "打印浓度", select { disabled:is_busy, value:"{p2_density}", onchange:move |e| {
+                            if let Ok(level) = e.value().parse::<u8>() { p2_density.set(level); }
+                        }, for level in 1..=15 { option {value:"{level}", "{level}"} } } }
+                    }
                     if printing() {
                         button { r#type:"button", disabled:stop_requested(), onclick:move |_| stop_requested.set(true),
                             if stop_requested() { "正在停止…" } else { "停止后续打印" }
@@ -817,82 +823,84 @@ pub fn App() -> Element {
                         button { r#type:"button", disabled:!can_print || invalid_page, onclick:move |_| confirm_print.set(Some(PrintScope::Current(current_page))), "试打当前页" }
                         }
                     }
-                    div { class: "preview",
-                        div { class:"dot-viewport",
-                            div { class:"label-sheet",
-                                style:"--sheet-ratio:{view_ratio};aspect-ratio:{view_w}/{view_h}",
-                                div { id:"label-canvas", class:"label-canvas", style:"{paper_outline};position:absolute;left:50%;top:50%;width:{100.0*f64::from(w)/f64::from(view_w)}%;height:{100.0*f64::from(h)/f64::from(view_h)}%;transform:translate(-50%,-50%) rotate({angle}deg)", "aria-label":"标签画布",
-                                    "data-w":"{w}", "data-h":"{h}", "data-disabled":"{is_busy}",
-                                    onresize:move |event| {
-                                        if let Ok(size) = event.get_content_box_size() {
-                                            canvas_pixels.set((size.width,size.height));
+                    div { class:"preview-layout",
+                        div { class: "preview",
+                            div { class:"dot-viewport",
+                                div { class:"label-sheet",
+                                    style:"--sheet-ratio:{view_ratio};aspect-ratio:{view_w}/{view_h}",
+                                    div { id:"label-canvas", class:"label-canvas", style:"{paper_outline};position:absolute;left:50%;top:50%;width:{100.0*f64::from(w)/f64::from(view_w)}%;height:{100.0*f64::from(h)/f64::from(view_h)}%;transform:translate(-50%,-50%) rotate({angle}deg)", "aria-label":"标签画布",
+                                        "data-w":"{w}", "data-h":"{h}", "data-disabled":"{is_busy}",
+                                        onresize:move |event| {
+                                            if let Ok(size) = event.get_content_box_size() {
+                                                canvas_pixels.set((size.width,size.height));
+                                            }
+                                        },
+                                        if let Ok(src) = &*dot_preview.read() {
+                                            img { class:"dot-print", src:"{src}", draggable:false, alt:"标签打印效果" }
                                         }
-                                    },
-                                    if let Ok(src) = &*dot_preview.read() {
-                                        img { class:"dot-print", src:"{src}", draggable:false, alt:"标签打印效果" }
-                                    }
-                                    for (i,(item,valid)) in canvas_items.read().iter().map(|(item, art)| {
-                                        let bounds = match drag().filter(|d| d.id == item.id) {
-                                            Some(d) => editor::transform(item, d.mode, d.delta.0, d.delta.1),
-                                            None => item.clone(),
-                                        };
-                                        (bounds, art.is_some())
-                                    }).enumerate() {
-                                        button {
-                                            key:"{item.id}", r#type:"button", class:"canvas-element",
-                                            "aria-label":"画布元素 {kind_name(item.kind)} {item.text}",
-                                            "aria-pressed":field() == i, "data-invalid":!valid,
-                                            disabled:is_busy,
-                                            "data-kind": match item.kind { Kind::Qr=>"qr", Kind::Image=>"image", _=>"other" }, "data-module":item.module_size.unwrap_or(0),
-                                            "data-index":"{i}", "data-x":"{item.x}", "data-y":"{item.y}", "data-w":"{item.w}", "data-h":"{item.h}",
-                                            style:"left:{100.0 * (item.x as f64 - f64::from(feed_shift)) / f64::from(w)}%;top:{100.0 * item.y as f64 / f64::from(h)}%;width:{100.0 * f64::from(item.footprint().0.max(1)) / f64::from(w)}%;height:{100.0 * f64::from(item.footprint().1.max(1)) / f64::from(h)}%",
-                                            onpointerdown:move |event| start_drag(event,i,Gesture::Move),
-                                            onclick:move |_| select_item(i),
-                                            onkeydown:move |event| {
-                                                let unit: i32=if event.modifiers().shift() {10} else {1};
-                                                let (sx,sy)=match event.key() {Key::ArrowLeft=>(-unit,0),Key::ArrowRight=>(unit,0),Key::ArrowUp=>(0,-unit),Key::ArrowDown=>(0,unit),_=>return};
-                                                let (dx,dy)=stock_delta(turns,f64::from(sx),f64::from(sy));
-                                                let (mut dx,mut dy)=(dx as i32,dy as i32);
-                                                let mode = if event.modifiers().alt() {
-                                                    if item.kind == Kind::Text { return; }
-                                                    let columns = i32::try_from((item.w / item.module_size.unwrap_or(1).max(1)).max(1)).unwrap_or(i32::MAX);
-                                                    if item.kind == Kind::Qr || (item.kind == Kind::Barcode && !item.swaps_axes()) { dx = dx.saturating_mul(columns); }
-                                                    if item.kind == Kind::Qr || (item.kind == Kind::Barcode && item.swaps_axes()) { dy = dy.saturating_mul(columns); }
-                                                    Gesture::Resize
-                                                } else { Gesture::Move };
-                                                event.prevent_default();
-                                                field.set(i);
-                                                edit_position(template,canvas_items,i,mode,dx,dy);
-                                            },
-                                            if field() == i && item.kind != Kind::Text {
-                                                span { class:"resize-handle", onpointerdown:move |event| start_drag(event,i,Gesture::Resize), title:"拖动缩放", "aria-hidden":"true" }
+                                        for (i,(item,valid)) in canvas_items.read().iter().map(|(item, art)| {
+                                            let bounds = match drag().filter(|d| d.id == item.id) {
+                                                Some(d) => editor::transform(item, d.mode, d.delta.0, d.delta.1),
+                                                None => item.clone(),
+                                            };
+                                            (bounds, art.is_some())
+                                        }).enumerate() {
+                                            button {
+                                                key:"{item.id}", r#type:"button", class:"canvas-element",
+                                                "aria-label":"画布元素 {kind_name(item.kind)} {item.text}",
+                                                "aria-pressed":field() == i, "data-invalid":!valid,
+                                                disabled:is_busy,
+                                                "data-kind": match item.kind { Kind::Qr=>"qr", Kind::Image=>"image", _=>"other" }, "data-module":item.module_size.unwrap_or(0),
+                                                "data-index":"{i}", "data-x":"{item.x}", "data-y":"{item.y}", "data-w":"{item.w}", "data-h":"{item.h}",
+                                                style:"left:{100.0 * (item.x as f64 - f64::from(feed_shift)) / f64::from(w)}%;top:{100.0 * item.y as f64 / f64::from(h)}%;width:{100.0 * f64::from(item.footprint().0.max(1)) / f64::from(w)}%;height:{100.0 * f64::from(item.footprint().1.max(1)) / f64::from(h)}%",
+                                                onpointerdown:move |event| start_drag(event,i,Gesture::Move),
+                                                onclick:move |_| select_item(i),
+                                                onkeydown:move |event| {
+                                                    let unit: i32=if event.modifiers().shift() {10} else {1};
+                                                    let (sx,sy)=match event.key() {Key::ArrowLeft=>(-unit,0),Key::ArrowRight=>(unit,0),Key::ArrowUp=>(0,-unit),Key::ArrowDown=>(0,unit),_=>return};
+                                                    let (dx,dy)=stock_delta(turns,f64::from(sx),f64::from(sy));
+                                                    let (mut dx,mut dy)=(dx as i32,dy as i32);
+                                                    let mode = if event.modifiers().alt() {
+                                                        if item.kind == Kind::Text { return; }
+                                                        let columns = i32::try_from((item.w / item.module_size.unwrap_or(1).max(1)).max(1)).unwrap_or(i32::MAX);
+                                                        if item.kind == Kind::Qr || (item.kind == Kind::Barcode && !item.swaps_axes()) { dx = dx.saturating_mul(columns); }
+                                                        if item.kind == Kind::Qr || (item.kind == Kind::Barcode && item.swaps_axes()) { dy = dy.saturating_mul(columns); }
+                                                        Gesture::Resize
+                                                    } else { Gesture::Move };
+                                                    event.prevent_default();
+                                                    field.set(i);
+                                                    edit_position(template,canvas_items,i,mode,dx,dy);
+                                                },
+                                                if field() == i && item.kind != Kind::Text {
+                                                    span { class:"resize-handle", onpointerdown:move |event| start_drag(event,i,Gesture::Resize), title:"拖动缩放", "aria-hidden":"true" }
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                if let (Some(item), Some((x,y))) = (&chosen, remove_corner) {
-                                    button { class:"element-remove canvas-remove danger", hidden:drag().is_some(), r#type:"button", disabled:is_busy,
-                                        style:"--corner-x:{x}%;--corner-y:{y}%",
-                                        "aria-label":"删除选中的{kind_name(item.kind)}", title:"删除元素",
-                                        onclick:move |_| remove_element(field()), "×"
+                                    if let (Some(item), Some((x,y))) = (&chosen, remove_corner) {
+                                        button { class:"element-remove canvas-remove danger", hidden:drag().is_some(), r#type:"button", disabled:is_busy,
+                                            style:"--corner-x:{x}%;--corner-y:{y}%",
+                                            "aria-label":"删除选中的{kind_name(item.kind)}", title:"删除元素",
+                                            onclick:move |_| remove_element(field()), "×"
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    div { class:"preview-footer",
-                        div { class: "pager",
-                            button { r#type: "button", disabled: current_page == 0 || is_busy, onclick: move |_| page.set(current_page.saturating_sub(1)), "上一张" }
-                            if label_count > 0 { span { "{number} / {label_count}" } } else { span { "0 / 0" } }
-                            button { r#type: "button", disabled: current_page + 1 >= label_count || is_busy, onclick: move |_| page.set(current_page + 1), "下一张" }
-                        }
-                        div { class:"print-summary",
-                            label { "每条份数", input { r#type:"number", min:1, max:core::MAX_BATCH, disabled:is_busy, value:"{copies}", oninput:move |e| copies.set(e.value()) } }
-                            if label_count > 0 {
-                                if batch_valid {
-                                    p { class:"muted", "{label_count} 条 × {copy_count} 份，共 {total} 张" }
-                                } else {
-                                    p { class:"error inline", "请调整每条份数，单批总量须为 1～500 张。" }
+                        div { class:"preview-controls", role:"group", "aria-label":"翻页和打印张数",
+                            div { class: "pager",
+                                button { r#type: "button", disabled: current_page == 0 || is_busy, onclick: move |_| page.set(current_page.saturating_sub(1)), "上一张" }
+                                if label_count > 0 { span { "{number} / {label_count}" } } else { span { "0 / 0" } }
+                                button { r#type: "button", disabled: current_page + 1 >= label_count || is_busy, onclick: move |_| page.set(current_page + 1), "下一张" }
+                            }
+                            div { class:"print-summary",
+                                label { "每条份数", input { r#type:"number", min:1, max:core::MAX_BATCH, disabled:is_busy, value:"{copies}", oninput:move |e| copies.set(e.value()) } }
+                                if label_count > 0 {
+                                    if batch_valid {
+                                        p { class:"muted", "{label_count} 条 × {copy_count} 份，共 {total} 张" }
+                                    } else {
+                                        p { class:"error inline", "请调整每条份数，单批总量须为 1～500 张。" }
+                                    }
                                 }
                             }
                         }
@@ -1010,11 +1018,24 @@ pub fn App() -> Element {
                                     } }
                                 }
                             }
-                            div { class:"actions", role:"group", "aria-label":"相对标签对齐",
-                                for (label,horizontal,edge) in [("靠左",true,0),("水平居中",true,1),("靠右",true,2),("靠上",false,0),("垂直居中",false,1),("靠下",false,2)] {
+                            div { class:"alignment-grid", role:"group", "aria-label":"相对标签对齐",
+                                for (label,horizontal,edge,guide,bars) in [
+                                    ("靠左",true,0,"M4 3v18","M6 6h13v4H6z M6 14h8v4H6z"),
+                                    ("水平居中",true,1,"M12 2v20","M3 6h18v4H3z M7 14h10v4H7z"),
+                                    ("靠右",true,2,"M20 3v18","M5 6h13v4H5z M10 14h8v4h-8z"),
+                                    ("靠上",false,0,"M3 4h18","M6 6h4v13H6z M14 6h4v8h-4z"),
+                                    ("垂直居中",false,1,"M2 12h20","M6 3h4v18H6z M14 7h4v10h-4z"),
+                                    ("靠下",false,2,"M3 20h18","M6 5h4v13H6z M14 10h4v8h-4z"),
+                                ] {
                                     button { r#type:"button",disabled:is_busy,onclick:move |_| {
                                         edit_item(template,canvas_items,field(),|item|editor::align(item,(w,h),turns,feed_shift,horizontal,edge));
-                                    },"{label}" }
+                                    },
+                                        svg {view_box:"0 0 24 24","aria-hidden":"true",
+                                            path {d:guide,stroke:"currentColor",stroke_width:"1.5"}
+                                            path {d:bars,fill:"currentColor"}
+                                        }
+                                        span {"{label}"}
+                                    }
                                 }
                             }
                             button { r#type:"button",disabled:is_busy || template.read().elements.len()>=core::MAX_FIELDS,onclick:move |_| {
@@ -1327,6 +1348,7 @@ pub fn App() -> Element {
                                 if busy() || !supported_media { return; }
                                 let Some(plan) = PrintJob::new(scope, label_count, copy_count) else { return; };
                                 let repeat = plan.copies;
+                                let density = p2_density();
                                 let job = match scope {
                                     PrintScope::Range => Ok(Vec::new()),
                                     PrintScope::Current(_) => preview().map(|svg| vec![svg]),
@@ -1364,7 +1386,7 @@ pub fn App() -> Element {
                                                     for buf in pages.iter().flat_map(|page| std::iter::repeat_n(page, repeat)) {
                                                         if stop_requested() { break; }
                                                         notice.set((format!("正在打印第 {} / {} 张…",completed+1,total),false));
-                                                        match printer.print_page(buf).await {
+                                                        match printer.print_page(buf, density).await {
                                                             Ok(())=>completed+=1,
                                                             Err(reason)=>{ failure=Some(reason); break; }
                                                         }

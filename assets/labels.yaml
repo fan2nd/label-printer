@@ -12,9 +12,6 @@ N1:
       rounded: true
       combined: false
 P2:
-  - id: 742d30db-d44c-46c7-a3f1-e840e289244e
-    width_mm: 48
-    length_mm: 50
   - id: 134ce696-cea5-41d3-bada-64d3609df3f9
     width_mm: 40
     length_mm: 30

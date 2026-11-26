@@ -53,15 +53,19 @@ label :is(input,select,textarea) {font-size:var(--body);color:var(--ink)}
 .section-row {justify-content:space-between;flex-wrap:wrap}
 .preview {display:grid;place-items:center;min-height:152px;padding:var(--s2);border:1px solid var(--line);border-radius:var(--radius);background:var(--bg)}
 .empty {color:var(--muted)}
-.preview-footer {display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--s2)}
-.pager {justify-content:center;font-variant-numeric:tabular-nums}
+.preview-layout {display:grid;grid-template-columns:minmax(0,1fr) clamp(84px,9vw,112px);gap:var(--s2);min-width:0}
+.preview-controls {display:grid;align-content:center;gap:var(--s4);min-width:0}
+.pager {flex-direction:column;align-items:stretch;text-align:center;font-variant-numeric:tabular-nums}
 .region {display:grid;gap:var(--s2)}
 .region + .region,.editor > .region {border-top:1px solid var(--line);padding-top:var(--s2)}
 .elements {list-style:none;display:grid;gap:var(--s2);margin:0;padding:var(--remove-radius) var(--remove-radius) 0 0}
 .element-entry {position:relative;min-width:0}
+.alignment-grid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--s1)}
+.alignment-grid button {display:grid;justify-items:center;align-content:center;gap:2px;padding:var(--s1);font-size:var(--small)}
+.alignment-grid svg {display:block;width:20px;height:20px}
 .layer-heading .actions {gap:var(--s1)}
 .layer-heading button {min-width:var(--control-height);padding:0}
-.element-select {display:flex;align-items:baseline;gap:var(--s2);width:100%;text-align:left;cursor:grab;user-select:none}
+.element-select {display:flex;align-items:center;gap:var(--s2);width:100%;text-align:left;cursor:grab;user-select:none}
 .layer-kind {flex:none;font-size:var(--small);color:var(--muted)}
 .layer-name {overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .elements [aria-pressed=true] {background:#e9effe;color:#143eae;border-color:var(--blue)}
@@ -71,9 +75,9 @@ label :is(input,select,textarea) {font-size:var(--body);color:var(--ink)}
 summary {cursor:pointer}
 .error {color:var(--danger)}
 .inline {padding:var(--s2);background:#fff0f1;border-radius:var(--radius)}
-.print-summary {display:flex;align-items:center;flex-wrap:wrap;gap:var(--s3)}
-.print-summary label {display:flex;align-items:center;gap:var(--s2)}
-.print-summary input {width:7ch}
+.print-summary {display:grid;gap:var(--s1)}
+.printer-density {display:flex;align-items:center;gap:var(--s2)}
+.print-summary input {width:100%}
 .dialog {background:white;border:1px solid var(--control);border-radius:var(--radius);padding:var(--s4);width:min(100%,400px);display:grid;gap:var(--s3)}
 .dialog .actions {justify-content:flex-end}
 @media(min-width:821px) and (max-height:740px) {

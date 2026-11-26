@@ -93,11 +93,11 @@ impl Device {
         }
     }
 
-    pub async fn print_page(&mut self, page: &[u8]) -> Result<(), String> {
+    pub async fn print_page(&mut self, page: &[u8], p2_density: u8) -> Result<(), String> {
         match self {
             Self::N1(device) => device.print_page(page).await,
-            Self::P2Usb(p) => p.print_page(page).await,
-            Self::P2(device) => device.print_page(page).await,
+            Self::P2Usb(p) => p.print_page(page, p2_density).await,
+            Self::P2(device) => device.print_page(page, p2_density).await,
         }
     }
 
