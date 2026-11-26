@@ -30,16 +30,94 @@ fn save<T: Serialize + ?Sized>(file: &str, value: &T) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|_| "无法编码本机数据。")?;
     atomic_write(&target, &bytes)
 }
+pub fn available_name(base: &str, templates: &[Template]) -> String {
+    let exists = |name: &str| templates.iter().any(|template| template.name == name);
+    if !exists(base) {
+        return base.into();
+    }
+    let mut number = 2;
+    loop {
+        let candidate = format!("{base} {number}");
+        if !exists(&candidate) {
+            return candidate;
+        }
+        number += 1;
+    }
+}
+
+pub struct Preset {
+    pub template: Template,
+    pub values: crate::core::Row,
+}
+
+pub fn presets() -> &'static [Preset] {
+    #[derive(Deserialize)]
+    struct Entry {
+        name: String,
+        id: uuid::Uuid,
+        media_id: uuid::Uuid,
+        values: crate::core::Row,
+        elements: Vec<Field>,
+    }
+    static LIBRARY: std::sync::OnceLock<Vec<Preset>> = std::sync::OnceLock::new();
+    LIBRARY.get_or_init(|| {
+        let entries: Vec<Entry> = serde_json::from_str(include_str!("../assets/templates.json"))
+            .expect("内置模板格式错误");
+        entries
+            .into_iter()
+            .map(|entry| {
+                let (_, media, _) = crate::core::builtin_media()
+                    .iter()
+                    .find(|(_, media, _)| media.id == entry.media_id)
+                    .expect("内置模板引用了未知耗材");
+                Preset {
+                    template: Template {
+                        id: entry.id,
+                        name: entry.name,
+                        media: media.clone(),
+                        elements: entry.elements,
+                    },
+                    values: entry.values,
+                }
+            })
+            .collect()
+    })
+}
+
 pub fn templates() -> Result<Vec<Template>, String> {
     let mut items: Vec<Template> = load("templates.json")?;
+    let migrate = items.iter().any(|t| t.id.is_nil() || t.media.id.is_nil());
     for item in &mut items {
-        ensure_unique_ids(&mut item.elements);
+        ensure_template_ids(item);
+    }
+    if migrate {
+        save("templates.json", &items)?;
     }
     Ok(items)
 }
-pub fn media() -> Result<Vec<Media>, String> {
-    load("media.json")
+pub fn recent_templates() -> Result<Vec<String>, String> {
+    load("recent-templates.json")
 }
+
+pub fn record_template(name: &str) -> Result<Vec<String>, String> {
+    let mut names = recent_templates()?;
+    names.retain(|n| n != name);
+    names.insert(0, name.to_owned());
+    names.truncate(4);
+    save("recent-templates.json", &names)?;
+    Ok(names)
+}
+pub fn media() -> Result<Vec<Media>, String> {
+    let mut items: Vec<Media> = load("media.json")?;
+    if items.iter().any(|m| m.id.is_nil()) {
+        for m in &mut items {
+            resolve_media_id(m);
+        }
+        save("media.json", &items)?;
+    }
+    Ok(items)
+}
+
 pub fn save_templates(value: &[Template]) -> Result<(), String> {
     let _ = templates()?; // avoid overwriting an unreadable/corrupt library
     save("templates.json", value)
@@ -69,12 +147,33 @@ struct ImportTemplate {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportPayload {
+    #[serde(default)]
+    id: uuid::Uuid,
     name: String,
     media: Media,
     elements: Vec<Field>,
 }
 
-fn ensure_unique_ids(elements: &mut [Field]) {
+fn resolve_media_id(media: &mut Media) {
+    if media.id.is_nil() {
+        media.id = crate::core::builtin_media()
+            .iter()
+            .find(|(_, stock, _)| {
+                stock.name == media.name
+                    && stock.width_mm == media.width_mm
+                    && stock.length_mm == media.length_mm
+            })
+            .map(|(_, stock, _)| stock.id)
+            .unwrap_or_else(uuid::Uuid::new_v4);
+    }
+}
+
+fn ensure_template_ids(template: &mut Template) {
+    if template.id.is_nil() {
+        template.id = uuid::Uuid::new_v4();
+    }
+    resolve_media_id(&mut template.media);
+    let elements = &mut template.elements;
     let mut seen = std::collections::HashSet::new();
     for field in elements {
         while !seen.insert(field.id) {
@@ -153,11 +252,12 @@ pub fn import_template(path: &Path) -> Result<Template, String> {
     debug_assert_eq!(parsed.format, TEMPLATE_FORMAT);
     debug_assert_eq!(parsed.version, header.version);
     let mut template = Template {
+        id: parsed.template.id,
         name: parsed.template.name,
         media: parsed.template.media,
         elements: parsed.template.elements,
     };
-    ensure_unique_ids(&mut template.elements);
+    ensure_template_ids(&mut template);
     validate_portable(&template)?;
     Ok(template)
 }
@@ -166,6 +266,57 @@ pub fn import_template(path: &Path) -> Result<Template, String> {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn catalog_ids_are_unique_and_copies_keep_their_stock() {
+        let mut ids = std::collections::HashSet::new();
+        for (_, m, _) in crate::core::builtin_media() {
+            assert!(ids.insert(m.id));
+        }
+        for p in presets() {
+            let t = &p.template;
+            assert!(ids.insert(t.id));
+            for f in &t.elements {
+                assert!(ids.insert(f.id));
+            }
+            let copy = t.duplicate();
+            assert_eq!(copy.media.id, t.media.id);
+            assert!(ids.insert(copy.id));
+            for f in copy.elements {
+                assert!(ids.insert(f.id));
+            }
+        }
+        assert!(!ids.contains(&uuid::Uuid::nil()));
+    }
+
+    #[test]
+    fn silver_stock_preset_samples_fit_the_printable_sheet() {
+        for preset in presets() {
+            let t = &preset.template;
+            assert!(t.media.is_known_n1());
+            let svg = crate::core::render_svg(t, &preset.values, "0001").unwrap();
+            assert_eq!(
+                crate::raster::packed_n1(&svg, &t.media).unwrap().len(),
+                200 * 12
+            );
+            let mut previous_bottom = 0;
+            for (i, f) in t.elements.iter().enumerate() {
+                let (bounds, art) = crate::core::editor_art(f, &preset.values, "0001", i).unwrap();
+                assert!(
+                    !crate::core::outside_media(
+                        &t.media,
+                        &bounds,
+                        Some(&art),
+                        crate::raster::N1_FEED_SHIFT
+                    ),
+                    "{}",
+                    t.name
+                );
+                assert!(bounds.y >= previous_bottom, "{}", t.name);
+                previous_bottom = bounds.y + i64::from(bounds.h);
+            }
+        }
+    }
 
     #[test]
     fn portable_roundtrip_preserves_media_and_unresolved_variables() {

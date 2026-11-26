@@ -26,7 +26,7 @@ pub fn encode(kind: Kind, content: &str) -> Result<Symbol, String> {
                 .map_err(|_| "Code 128 无法编码该内容。")?;
             Ok(Symbol::Barcode(code.encode()))
         }
-        Kind::Image | Kind::Text => Err("文字元素无法编码为条码。".into()),
+        _ => Err("该元素不支持条码编码。".into()),
     }
 }
 

@@ -1,5 +1,6 @@
 //! DeTong P2 BLE printing. The wire format is described in IvanLi-CN/detonger
 //! (docs/ble.md and docs/protocol.md). A successful write is a submission only.
+pub mod usb;
 use btleplug::{
     api::{
         Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter,
@@ -13,6 +14,14 @@ use uuid::Uuid;
 
 const SERVICE: Uuid = Uuid::from_u128(0x49535343_fe7d_4ae5_8fa9_9fafd205e455);
 const WRITE: Uuid = Uuid::from_u128(0x49535343_8841_43f4_a8d4_ecbe34729bb3);
+// The second endpoint is advertised by a P2 measured on macOS.
+const WRITE_ENDPOINTS: [(Uuid, Uuid); 2] = [
+    (SERVICE, WRITE),
+    (
+        uuid::uuid!("0000ff00-0000-1000-8000-00805f9b34fb"),
+        uuid::uuid!("0000ff02-0000-1000-8000-00805f9b34fb"),
+    ),
+];
 const STRIDE: usize = 48;
 const MAX_ROWS: usize = 1600;
 
@@ -43,11 +52,16 @@ fn bitmap_messages(pixels: &[u8]) -> Result<impl Iterator<Item = Vec<u8>> + '_, 
 }
 
 fn is_p2(name: &str) -> bool {
-    matches!(name.split(['-', '_']).next(), Some("P2"))
+    let matches_model = |n: &str| matches!(n.trim().split(['-', '_']).next(), Some("P2"));
+    matches_model(name)
+        || name
+            .rsplit_once(" [")
+            .and_then(|(_, ad)| ad.strip_suffix(']'))
+            .is_some_and(matches_model)
 }
 
 pub struct Printer {
-    _manager: Manager,
+    disconnect_monitor: Option<crate::ble_connection::DisconnectMonitor>,
     peripheral: Peripheral,
     characteristic: Characteristic,
     mode: WriteType,
@@ -78,7 +92,7 @@ impl Printer {
                 continue;
             }
             scanned = true;
-            sleep(Duration::from_secs(4)).await;
+            sleep(Duration::from_secs(7)).await;
             let devices = timeout(Duration::from_secs(3), adapter.peripherals()).await;
             let _ = timeout(Duration::from_secs(2), adapter.stop_scan()).await;
             let Ok(Ok(devices)) = devices else { continue };
@@ -87,7 +101,7 @@ impl Printer {
                     timeout(Duration::from_secs(2), peripheral.properties()).await
                 {
                     if let Some(name) = props.local_name.filter(|name| is_p2(name)) {
-                        found.push((peripheral, name));
+                        found.push((adapter.clone(), peripheral, name));
                     }
                 }
             }
@@ -98,36 +112,43 @@ impl Printer {
         if found.len() > 1 {
             return Err("发现多台 P2，请只开启目标打印机后重新连接。".into());
         }
-        let (peripheral, name) = found
+        let (adapter, peripheral, name) = found
             .pop()
             .ok_or("未找到 P2，请开启打印机并断开其他应用的连接。")?;
         let setup = async {
             peripheral.connect().await.map_err(|_| "无法连接 P2。")?;
+            let monitor =
+                crate::ble_connection::disconnect_monitor(adapter, peripheral.clone()).await;
             peripheral
                 .discover_services()
                 .await
                 .map_err(|_| "无法读取 P2 蓝牙服务。")?;
-            let characteristic = peripheral
-                .characteristics()
-                .into_iter()
-                .find(|c| c.service_uuid == SERVICE && c.uuid == WRITE)
-                .ok_or("所选设备没有 P2 打印服务。")?;
-            let flags = characteristic.properties;
-            let mode = if flags.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE) {
-                WriteType::WithoutResponse
-            } else if flags.contains(CharPropFlags::WRITE) {
-                WriteType::WithResponse
-            } else {
-                return Err("P2 打印服务不可写入。");
-            };
-            Ok((characteristic, mode))
+            let characteristics = peripheral.characteristics();
+            for (service, write) in WRITE_ENDPOINTS {
+                if let Some(c) = characteristics
+                    .iter()
+                    .find(|c| c.service_uuid == service && c.uuid == write)
+                {
+                    let flags = c.properties;
+                    if service != SERVICE && flags.contains(CharPropFlags::WRITE) {
+                        return Ok((c.clone(), WriteType::WithResponse, monitor));
+                    }
+                    if flags.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE) {
+                        return Ok((c.clone(), WriteType::WithoutResponse, monitor));
+                    }
+                    if flags.contains(CharPropFlags::WRITE) {
+                        return Ok((c.clone(), WriteType::WithResponse, monitor));
+                    }
+                }
+            }
+            Err("P2 已连接，但未发现当前驱动支持的可写打印特征。")
         };
         let ready = timeout(Duration::from_secs(16), setup)
             .await
             .unwrap_or(Err("连接 P2 超时，请重新连接。"));
         match ready {
-            Ok((characteristic, mode)) => Ok(Self {
-                _manager: manager,
+            Ok((characteristic, mode, monitor)) => Ok(Self {
+                disconnect_monitor: Some(monitor),
                 peripheral,
                 characteristic,
                 mode,
@@ -145,11 +166,12 @@ impl Printer {
         &self.name
     }
 
+    pub fn take_disconnect_monitor(&mut self) -> Option<crate::ble_connection::DisconnectMonitor> {
+        self.disconnect_monitor.take()
+    }
+
     pub async fn is_connected(&self) -> bool {
-        self.usable
-            && timeout(Duration::from_secs(3), self.peripheral.is_connected())
-                .await
-                .is_ok_and(|result| result.unwrap_or(false))
+        self.usable && crate::ble_connection::connection_state(&self.peripheral).await == Some(true)
     }
 
     pub async fn disconnect(&self) -> Result<(), String> {

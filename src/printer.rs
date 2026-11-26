@@ -7,7 +7,7 @@ use btleplug::{
         Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter,
         ValueNotification, WriteType,
     },
-    platform::{Manager, Peripheral},
+    platform::{Adapter, Manager, Peripheral},
 };
 use futures::{FutureExt, Stream, StreamExt};
 use std::{collections::VecDeque, pin::Pin, time::Duration};
@@ -22,8 +22,7 @@ const MODEL_ID: u16 = 3586;
 const STRIDE: usize = 12;
 
 struct Ble {
-    // Keep the platform manager alive while the connection and events are in use.
-    _manager: Manager,
+    disconnect_monitor: Option<crate::ble_connection::DisconnectMonitor>,
     peripheral: Peripheral,
     characteristic: Characteristic,
     notify: Pin<Box<dyn Stream<Item = ValueNotification> + Send>>,
@@ -192,12 +191,12 @@ impl Printer {
                         continue;
                     };
                     if name == "N1" || name.starts_with("N1-") || name.starts_with("N1_") {
-                        candidates.push((peripheral, name));
+                        candidates.push((adapter.clone(), peripheral, name));
                     }
                 }
             }
         }
-        let (peripheral, name) = match candidates.len() {
+        let (adapter, peripheral, name) = match candidates.len() {
             0 if !scanned => return Err("蓝牙扫描不可用，请确认系统蓝牙已开启。".into()),
             0 => return Err("未找到 N1，请打开打印机并让手机 App 断开蓝牙。".into()),
             1 => candidates.pop().unwrap(),
@@ -205,7 +204,7 @@ impl Printer {
         };
         let result = timeout(
             Duration::from_secs(16),
-            Self::open(manager, peripheral.clone(), name),
+            Self::open(adapter, peripheral.clone(), name),
         )
         .await;
         match result {
@@ -221,11 +220,12 @@ impl Printer {
         }
     }
 
-    async fn open(manager: Manager, peripheral: Peripheral, name: String) -> Result<Self, String> {
+    async fn open(adapter: Adapter, peripheral: Peripheral, name: String) -> Result<Self, String> {
         peripheral
             .connect()
             .await
             .map_err(|_| "无法建立蓝牙连接。")?;
+        let monitor = crate::ble_connection::disconnect_monitor(adapter, peripheral.clone()).await;
         peripheral
             .discover_services()
             .await
@@ -254,7 +254,7 @@ impl Printer {
             .map_err(|_| "无法接收打印机通知。")?;
         Self::identify(
             Link::Ble(Ble {
-                _manager: manager,
+                disconnect_monitor: Some(monitor),
                 peripheral,
                 characteristic,
                 notify,
@@ -333,6 +333,13 @@ impl Printer {
         tag_barcode(&reply.body).map(str::to_owned)
     }
 
+    pub fn take_disconnect_monitor(&mut self) -> Option<crate::ble_connection::DisconnectMonitor> {
+        match &mut self.link {
+            Link::Ble(ble) => ble.disconnect_monitor.take(),
+            _ => None,
+        }
+    }
+
     pub async fn is_connected(&self) -> bool {
         self.ready && self.link_connected().await
     }
@@ -340,7 +347,9 @@ impl Printer {
     async fn link_connected(&self) -> bool {
         match &self.link {
             Link::Usb(port) => port.connected(),
-            Link::Ble(ble) => ble.peripheral.is_connected().await.unwrap_or(false),
+            Link::Ble(ble) => {
+                crate::ble_connection::connection_state(&ble.peripheral).await == Some(true)
+            }
             Link::Closed => false,
         }
     }

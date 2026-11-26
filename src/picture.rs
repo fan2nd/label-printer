@@ -59,6 +59,9 @@ pub fn import(path: &Path, media: &Media) -> Result<Field, String> {
     let (mw, mh) = media.canvas_size();
     let (w, h) = fit(width, height, mw, mh);
     Ok(Field {
+        rotation: 0,
+        stroke_dots: 1,
+        filled: false,
         id: uuid::Uuid::new_v4(),
         kind: Kind::Image,
         text: String::new(),
@@ -66,6 +69,7 @@ pub fn import(path: &Path, media: &Media) -> Result<Field, String> {
         y: 0,
         w,
         h,
+        font_family: None,
         font_size: None,
         module_size: None,
         picture: Some(Picture {
@@ -174,6 +178,7 @@ mod tests {
         let scaled = editor::transform(&field, editor::Gesture::Resize, 8, 4);
         assert_eq!((scaled.w, scaled.h), (16, 12));
         let template = Template {
+            id: uuid::Uuid::new_v4(),
             name: "测试".into(),
             media,
             elements: vec![scaled],

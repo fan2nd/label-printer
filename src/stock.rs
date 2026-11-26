@@ -5,10 +5,6 @@ pub const N1_HEAD_DOTS: u32 = 96;
 pub const P2_HEAD_DOTS: u32 = 384;
 pub const MAX_MEDIA_LENGTH_DOTS: u32 = 1600;
 
-pub fn dots(mm: u16) -> u32 {
-    dots_at(mm, DPI)
-}
-
 pub fn dots_at(mm: u16, dpi: u32) -> u32 {
     (u32::from(mm) * dpi * 10 + 127) / 254
 }
@@ -18,25 +14,13 @@ pub enum Model {
     #[default]
     N1,
     P2,
-    PtP300bt,
 }
 
 impl Model {
-    pub fn dpi(self) -> u32 {
-        if self == Self::PtP300bt {
-            180
-        } else {
-            DPI
-        }
-    }
-    pub fn length_dots(self, mm: u16) -> u32 {
-        dots_at(mm, self.dpi())
-    }
     pub fn head_dots(self) -> u32 {
         match self {
             Self::N1 => N1_HEAD_DOTS,
             Self::P2 => P2_HEAD_DOTS,
-            Self::PtP300bt => 128,
         }
     }
 }
@@ -47,16 +31,22 @@ pub struct Cut {
     pub rounded: Option<bool>,
     pub combined: Option<bool>,
     pub radius_dots: u32,
-    pub feed_margin_mm: u16,
+    // Older templates serialized this field even when it was zero.
+    #[serde(
+        rename = "feed_margin_mm",
+        skip_serializing,
+        deserialize_with = "discard_old_margin"
+    )]
+    pub(crate) old_margin: (),
     pub regions_dots: Vec<[u32; 4]>,
+}
+
+fn discard_old_margin<'de, D: serde::Deserializer<'de>>(d: D) -> Result<(), D::Error> {
+    u16::deserialize(d).map(|_| ())
 }
 
 impl Cut {
     pub fn validate(&self, w: u32, h: u32) -> Result<(), String> {
-        let feed = dots(self.feed_margin_mm);
-        if feed * 2 >= w {
-            return Err("留白超过标签尺寸。".into());
-        }
         if self.radius_dots > 0 && self.rounded != Some(true) {
             return Err("设置圆角半径时须标明圆角标签。".into());
         }
@@ -81,14 +71,6 @@ impl Cut {
     }
 
     #[allow(dead_code)] // Used by the renderer; the build script shares only validation.
-    pub fn contains(&self, x: u32, y: u32, w: u32, h: u32) -> bool {
-        let feed = dots(self.feed_margin_mm);
-        if x < feed || x >= w.saturating_sub(feed) {
-            return false;
-        }
-        self.inside_die(x, y, w, h)
-    }
-
     pub fn inside_die(&self, x: u32, y: u32, w: u32, h: u32) -> bool {
         let inside = |[ox, oy, rw, rh]: [u32; 4]| {
             if x < ox || y < oy || x - ox >= rw || y - oy >= rh {

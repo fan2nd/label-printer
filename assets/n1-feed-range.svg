@@ -1,47 +1,34 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="96" viewBox="0 0 200 96">
-  <title>N1 · 12 × 25 mm 四边范围标定（每格 1 点）</title>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="96" height="200" viewBox="0 0 96 200">
+  <title>N1 · 12 × 25 mm · 先出纸边在上，每阶 1 点，每长格 8 点</title>
   <defs>
-    <!-- Each column has a unique step within its eight-dot group. -->
-    <pattern id="steps" patternUnits="userSpaceOnUse" width="8" height="96">
-      <path d="M0 27h1v4H0z M1 31h1v4H1z M2 35h1v4H2z M3 39h1v4H3z
-               M4 43h1v4H4z M5 47h1v4H5z M6 51h1v4H6z M7 55h1v4H7z
-               M0 61h1v9H0z M4 61h1v5H4z"/>
+    <!-- A vertical ruler advances three dots across for every dot inward. -->
+    <pattern id="vertical" patternUnits="userSpaceOnUse" width="33" height="8">
+      <path d="M0 0h8v1H0z M4 4h4v1H4z M8 0h1v8H8z
+               M9 0h3v1H9z M12 1h3v1h-3z M15 2h3v1h-3z M18 3h3v1h-3z
+               M21 4h3v1h-3z M24 5h3v1h-3z M27 6h3v1h-3z M30 7h3v1h-3z"/>
     </pattern>
-    <g id="scale">
-      <rect width="100" height="96" fill="url(#steps)"/>
-      <rect y="60" width="100" height="1"/>
-    </g>
-    <!-- Vertical ruler, mirrored at the bottom edge. -->
-    <pattern id="cross-steps" patternUnits="userSpaceOnUse" width="200" height="8">
-      <path d="M90 0h3v1h-3z M93 1h3v1h-3z M96 2h3v1h-3z M99 3h3v1h-3z
-               M102 4h3v1h-3z M105 5h3v1h-3z M108 6h3v1h-3z M111 7h3v1h-3z
-               M81 0h8v1h-8z M85 4h4v1h-4z"/>
+    <pattern id="horizontal" patternUnits="userSpaceOnUse" width="8" height="25">
+      <path d="M0 0h1v8H0z M4 4h1v4H4z M0 8h8v1H0z
+               M0 9h1v2H0z M1 11h1v2H1z M2 13h1v2H2z M3 15h1v2H3z
+               M4 17h1v2H4z M5 19h1v2H5z M6 21h1v2H6z M7 23h1v2H7z"/>
     </pattern>
-    <g id="cross-scale">
-      <rect x="81" width="33" height="48" fill="url(#cross-steps)"/>
-      <rect x="89" width="1" height="48"/>
-    </g>
+    <rect id="yscale" width="33" height="72" fill="url(#vertical)"/>
+    <rect id="xscale" width="48" height="25" fill="url(#horizontal)"/>
   </defs>
-  <rect width="200" height="96" fill="white"/>
-  <use xlink:href="#scale"/>
-  <use xlink:href="#scale" transform="translate(200 0) scale(-1 1)"/>
-  <rect x="72" width="56" height="96" fill="white"/>
-  <use xlink:href="#cross-scale"/>
-  <use xlink:href="#cross-scale" transform="translate(0 96) scale(1 -1)"/>
-  <g font-family="sans-serif" fill="black" text-anchor="middle">
-    <text x="51" y="20" font-size="14">L</text>
-    <text x="149" y="20" font-size="14">R</text>
-    <text x="128" y="10" font-size="10">T</text>
-    <text x="124" y="94" font-size="10">B</text>
-    <g font-size="8">
-      <text x="119" y="18">16</text><text x="119" y="34">32</text>
-      <text x="119" y="66">32</text><text x="119" y="83">16</text>
-    </g>
-    <g font-size="9">
-      <text x="16" y="81">16</text><text x="32" y="81">32</text><text x="48" y="81">48</text>
-      <text x="64" y="81">64</text>
-      <text x="136" y="81">64</text><text x="152" y="81">48</text>
-      <text x="168" y="81">32</text><text x="184" y="81">16</text>
+  <rect width="96" height="200" fill="white"/>
+  <use xlink:href="#yscale" transform="translate(29 0)"/>
+  <use xlink:href="#yscale" transform="translate(29 200) scale(1 -1)"/>
+  <use xlink:href="#xscale" transform="translate(0 93)"/>
+  <use xlink:href="#xscale" transform="translate(96 93) scale(-1 1)"/>
+  <path d="M11 7l6 8h-4v11H9V15H5z"/>
+  <g font-family="sans-serif" font-weight="bold" text-anchor="middle">
+    <g font-size="14"><text x="11" y="43">T</text><text x="11" y="182">B</text></g>
+    <g font-size="12"><text x="6" y="82">L</text><text x="90" y="82">R</text></g>
+    <g font-size="10">
+      <text x="76" y="20">16</text><text x="76" y="36">32</text><text x="76" y="52">48</text><text x="76" y="68">64</text>
+      <text x="76" y="187">16</text><text x="76" y="171">32</text><text x="76" y="155">48</text><text x="76" y="139">64</text>
+      <text x="16" y="91">16</text><text x="32" y="91">32</text><text x="63" y="91">32</text><text x="79" y="91">16</text>
+      <text x="48" y="127">N1  12×25 mm</text>
     </g>
   </g>
 </svg>

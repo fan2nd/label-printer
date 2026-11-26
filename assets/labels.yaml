@@ -1,0 +1,20 @@
+# 规格顺序为纸宽 × 走纸长（mm）。width_mm 沿打印头，length_mm 沿走纸轴。
+# 画布坐标以左上为原点，X 沿走纸轴向右，Y 沿纸宽轴向下。
+# 每个机型的第一项是默认规格，可选 name 自定义显示名称。
+# N1 可在规格项添加 barcodes，例如 barcodes: ["实际读到的耗材编码"]。
+N1:
+  - id: 4cd6e536-4df9-48da-a119-17bd09c43f5d
+    name: "N1 · 12 × 25 mm 圆角亚银标签"
+    width_mm: 12
+    length_mm: 25
+    barcodes: ["05262201"]
+    cut:
+      rounded: true
+      combined: false
+P2:
+  - id: 742d30db-d44c-46c7-a3f1-e840e289244e
+    width_mm: 48
+    length_mm: 50
+  - id: 134ce696-cea5-41d3-bada-64d3609df3f9
+    width_mm: 40
+    length_mm: 30

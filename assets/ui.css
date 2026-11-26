@@ -10,10 +10,9 @@
 * {box-sizing:border-box}
 body {margin:0}
 .app {
-  --workspace-inset:var(--s4); --panel-inset:var(--s3);
-  max-width:calc(1360px - 2 * var(--workspace-inset));
-  margin:var(--s3) auto; width:calc(100% - 2 * var(--workspace-inset));
-  background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+  --panel-inset:var(--s3);
+  min-height:100vh;min-height:100dvh;
+  display:grid;grid-template-rows:auto 1fr;background:var(--surface);
 }
 .bar,.editor,.inspector {padding:var(--panel-inset)}
 .bar {border-bottom:1px solid var(--line)}
@@ -38,11 +37,18 @@ button.primary:hover:not(:disabled) {background:#1541b7}
 button.danger {color:var(--danger)}
 :focus-visible {outline:2px solid var(--blue);outline-offset:2px}
 input,select,textarea {padding:var(--s1) var(--s2);min-width:0;width:100%}
+select {
+  appearance:none;-webkit-appearance:none;height:var(--control-height);line-height:normal;
+  padding-inline-end:28px;text-overflow:ellipsis;
+  background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-size:5px 5px;background-position:calc(100% - 14px) center,calc(100% - 9px) center;background-repeat:no-repeat;
+}
+label {min-width:0}
 input[type=file] {padding:var(--s1);font-size:var(--small)}
 textarea {max-width:100%;resize:vertical}
 label {display:grid;gap:var(--s1);color:var(--muted);font-size:var(--small)}
 label :is(input,select,textarea) {font-size:var(--body);color:var(--ink)}
-.workspace {display:grid;grid-template-columns:minmax(0,1fr) minmax(270px,340px)}
+.workspace {display:grid;min-height:0;grid-template-columns:clamp(178px,16vw,238px) minmax(0,1fr) clamp(260px,24vw,350px)}
 .editor,.inspector {min-width:0;display:grid;align-content:start;gap:var(--s2)}
 .section-row {justify-content:space-between;flex-wrap:wrap}
 .preview {display:grid;place-items:center;min-height:152px;padding:var(--s2);border:1px solid var(--line);border-radius:var(--radius);background:var(--bg)}
@@ -51,9 +57,15 @@ label :is(input,select,textarea) {font-size:var(--body);color:var(--ink)}
 .pager {justify-content:center;font-variant-numeric:tabular-nums}
 .region {display:grid;gap:var(--s2)}
 .region + .region,.editor > .region {border-top:1px solid var(--line);padding-top:var(--s2)}
-.elements {display:flex;flex-wrap:wrap;gap:var(--s2) var(--s3);padding-top:var(--remove-radius);padding-right:var(--remove-radius)}
-.element-entry {position:relative}
+.elements {list-style:none;display:grid;gap:var(--s2);margin:0;padding:var(--remove-radius) var(--remove-radius) 0 0}
+.element-entry {position:relative;min-width:0}
+.layer-heading .actions {gap:var(--s1)}
+.layer-heading button {min-width:var(--control-height);padding:0}
+.element-select {display:flex;align-items:baseline;gap:var(--s2);width:100%;text-align:left;cursor:grab;user-select:none}
+.layer-kind {flex:none;font-size:var(--small);color:var(--muted)}
+.layer-name {overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .elements [aria-pressed=true] {background:#e9effe;color:#143eae;border-color:var(--blue)}
+.elements[data-reordering=true] .element-entry:hover .element-select {outline:2px solid var(--blue);cursor:grabbing}
 .coords {display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) auto;align-items:end;gap:var(--s2)}
 .numeric {grid-template-columns:repeat(4,minmax(0,1fr))}
 summary {cursor:pointer}
@@ -65,16 +77,14 @@ summary {cursor:pointer}
 .dialog {background:white;border:1px solid var(--control);border-radius:var(--radius);padding:var(--s4);width:min(100%,400px);display:grid;gap:var(--s3)}
 .dialog .actions {justify-content:flex-end}
 @media(min-width:821px) and (max-height:740px) {
-  .app {margin-block:var(--s2)}
   .bar {padding-block:var(--s2)}
   .region {row-gap:var(--s1)}
 }
-@media(max-width:820px){.app {--workspace-inset:var(--s3)}.workspace {grid-template-columns:1fr}.inspector{border-left:0;border-top:1px solid var(--line)}}
 @media(max-width:470px){.bar {gap:var(--s2)}.coords {grid-template-columns:repeat(2,minmax(0,1fr))}.preview{min-height:120px}.app {--panel-inset:var(--s3)}}
 @media (pointer:coarse){:root {--control-height:44px}}
 
 /* Interactive print area; dimensions are printer dots, not display pixels. */
-.label-sheet {position:relative;margin-inline:auto}
+.label-sheet {position:relative;width:min(100%,calc(100cqh * var(--sheet-ratio)))}
 .label-canvas {
   position:relative;width:100%;height:100%; background:var(--surface);
   user-select:none; isolation:isolate; overflow:hidden;
@@ -86,7 +96,7 @@ summary {cursor:pointer}
 }
 .preview .canvas-element:hover:not(:disabled) {background:transparent;outline-color:var(--control)}
 .preview .canvas-element[aria-pressed=true],
-.preview .canvas-element:focus-visible {outline:2px solid var(--blue);outline-offset:-2px;z-index:2}
+.preview .canvas-element:focus-visible {outline:2px solid var(--blue);outline-offset:-2px}
 .drag-surface {position:fixed;inset:0;z-index:10;touch-action:none;user-select:none}
 .preview .canvas-element[data-invalid=true] {outline:1px dashed var(--danger);outline-offset:-1px}
 .editor {--remove-radius:9px}
@@ -110,13 +120,12 @@ dialog.native-dialog {position:fixed; inset:0; margin:auto; height:max-content; 
 
 .printer-model {width:auto}
 
-.dot-viewport {padding:var(--remove-radius);width:100%;min-width:0;max-height:380px;overflow:auto}
-.dot-print {display:block;width:100%;height:100%;pointer-events:none}
-.dot-print[data-zoomed=true] {image-rendering:pixelated}
+.dot-viewport {display:grid;grid-template:minmax(0,1fr) / minmax(0,1fr);place-items:center;place-self:stretch;min-width:0;min-height:0;padding:max(var(--s3),var(--remove-radius));container-type:size}
+.dot-print {display:block;width:100%;height:100%;pointer-events:none;image-rendering:pixelated}
 .preview {grid-template-columns:minmax(0,1fr);padding:0}
 
 .image-settings {display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap}
-.image-settings label:first-child {flex:1;min-width:120px}
+.image-settings label:has(input[type=range]) {flex:1;min-width:120px}
 .image-settings label:has(input[type=checkbox]) {display:flex;align-items:center;gap:var(--s1)}
 .image-settings input[type=checkbox] {width:auto; min-height:0}
 
@@ -124,4 +133,53 @@ dialog.native-dialog {position:fixed; inset:0; margin:auto; height:max-content; 
 .bar select {width:auto;max-width:100%}
 .bar .usb-port {max-width:min(28ch,100%);text-overflow:ellipsis}
 
-.range-preview svg {display:block;width:100%;height:auto;border:1px solid var(--line)}
+.range-preview img {display:block;width:100%;height:min(42vh,320px);object-fit:contain;image-rendering:pixelated}
+
+.recent-templates {display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:var(--s2)}
+.recent-templates button {display:grid;text-align:left;min-width:0}
+.recent-templates img {width:100%;height:38px;object-fit:contain}
+.recent-templates span {overflow-wrap:anywhere}
+
+.bar {display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center}
+.brand {min-width:0}
+.job-actions {justify-content:flex-end}
+.device-switch {display:inline-flex;align-items:center;gap:var(--s2)}
+.device-switch[aria-expanded=true] {background:#eef3fb;border-color:var(--blue)}
+.device-dot {width:8px;height:8px;border-radius:50%;background:var(--control)}
+.device-dot.connected {background:#21743d}
+.device-settings {grid-column:1/-1;display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;border-top:1px solid var(--line);padding-top:var(--s2)}
+.toolbar-notice {grid-column:1/-1}
+.inspector-nav {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--line)}
+.inspector-nav button {border:0;border-bottom:2px solid transparent;border-radius:0;color:var(--muted)}
+.inspector-nav button[aria-pressed=true] {color:var(--blue);border-color:var(--blue);font-weight:650}
+.document-title {overflow-wrap:anywhere}
+.dot-viewport {background:#e9edf2}
+.label-sheet {box-shadow:0 1px 4px #26354835}
+@media(max-width:760px){.bar{grid-template-columns:1fr}.job-actions{justify-content:flex-start}}
+
+.palette {min-width:0;border-right:1px solid var(--line);padding:var(--panel-inset)}
+.palette-grid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;margin-block:8px 16px}
+.palette-grid button {display:grid;place-content:center;justify-items:center;gap:4px;padding:6px 2px;border-color:transparent;font-size:12px}
+.palette-grid svg {width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.palette .elements {--remove-radius:8px;margin-bottom:12px}
+.inspector .coords {grid-template-columns:repeat(2,minmax(0,1fr))}
+.editor .preview {background:#e9edf2}
+.editor .dot-viewport {background:transparent}
+.device-choice {position:relative;min-width:0;max-width:100%}
+.device-settings button {height:var(--control-height)}
+.transport-picker {display:flex}
+.transport-picker button {border-radius:0;padding-inline:10px}
+.transport-picker button:first-child {border-radius:var(--radius) 0 0 var(--radius)}
+.transport-picker button:last-child {border-radius:0 var(--radius) var(--radius) 0;margin-left:-1px}
+.transport-picker [aria-pressed=true] {background:#e9effe;color:#143eae;border-color:var(--blue);z-index:1}
+@media(min-width:681px) {
+  .app {height:100vh;height:100dvh;grid-template-rows:auto minmax(0,1fr)}
+  .workspace {grid-template-rows:minmax(0,1fr)}
+  .workspace > :is(.palette,.editor,.inspector) {min-height:0;overflow:auto;overscroll-behavior:contain}
+  .editor {grid-template-rows:auto minmax(min-content,1fr)}
+}
+@media(min-width:681px) and (max-width:960px) {
+  .workspace {grid-template-rows:fit-content(35%) minmax(0,1fr)}
+}
+@media(max-width:960px){.workspace{grid-template-columns:minmax(0,1fr) 260px}.palette{grid-column:1/-1;border-right:0;border-bottom:1px solid var(--line)}.palette-grid{grid-template-columns:repeat(8,minmax(0,1fr));margin-block:4px}.palette .elements{margin:0}.inspector{border-top:0;border-left:1px solid var(--line)}}
+@media(max-width:680px){.workspace{grid-template-columns:minmax(0,1fr);align-content:start}.inspector{border-left:0;border-top:1px solid var(--line)}.editor .preview{min-height:180px}}

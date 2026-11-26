@@ -5,7 +5,7 @@ use std::ops::Range;
 pub enum PrintScope {
     Current(usize),
     Batch,
-    N1Range,
+    Range,
 }
 
 pub struct PrintJob {
@@ -16,7 +16,7 @@ pub struct PrintJob {
 impl PrintJob {
     pub fn new(scope: PrintScope, records: usize, copies: usize) -> Option<Self> {
         match scope {
-            PrintScope::N1Range => Some(Self {
+            PrintScope::Range => Some(Self {
                 records: 0..1,
                 copies: 1,
             }),

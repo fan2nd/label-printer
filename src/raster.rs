@@ -42,6 +42,23 @@ pub(crate) fn fonts() -> Arc<fontdb::Database> {
         .clone()
 }
 
+pub(crate) fn font_families() -> &'static [String] {
+    static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
+    FAMILIES.get_or_init(|| {
+        let db = fonts();
+        let mut names: Vec<_> = db
+            .faces()
+            .filter_map(|f| f.families.first())
+            .map(|(name, _)| name)
+            .filter(|name| !name.starts_with('.'))
+            .cloned()
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    })
+}
+
 pub(crate) fn ink_mask(svg: &str) -> Result<Vec<bool>, String> {
     let options = Options {
         fontdb: fonts(),
@@ -62,13 +79,59 @@ pub(crate) fn ink_mask(svg: &str) -> Result<Vec<bool>, String> {
 // The N1 needs a one-dot feed correction measured on this model.
 pub(crate) const N1_FEED_SHIFT: u32 = 1;
 
-pub const N1_RANGE_SVG: &str = include_str!("../assets/n1-feed-range.svg");
+#[derive(Clone)]
+pub struct RangeLabel {
+    pub page: Vec<u8>,
+    pub preview: String,
+}
 
-pub fn n1_range_page(media: &Media) -> Result<Vec<u8>, String> {
-    if !media.is_known_n1() || media.canvas_size() != (200, 96) {
-        return Err("标定标签需要 N1 的 12 × 25 mm 耗材。".into());
+/// Calibration coordinates are the physical head dots (left to right) and
+/// feed rows (first to last). Both target widths and their head offsets are byte-aligned.
+pub fn range_label(
+    model: crate::stock::Model,
+    media: &Media,
+    usb: bool,
+) -> Result<RangeLabel, String> {
+    use crate::stock::Model;
+    use std::borrow::Cow;
+    let (along, across) = media.canvas_size();
+    let svg: Cow<'_, str> = match model {
+        Model::N1 if media.is_known_n1() && (along, across) == (200, 96) => {
+            include_str!("../assets/n1-feed-range.svg").into()
+        }
+        Model::P2
+            if media.supports_p2()
+                && (media.width_mm, media.length_mm, along, across) == (40, 30, 240, 320) =>
+        {
+            include_str!("../assets/p2-range-40x30.svg")
+                .replace(">P2<", if usb { ">P2 USB<" } else { ">P2 BLE<" })
+                .into()
+        }
+        Model::N1 => return Err("标定标签需要 N1 的 12 × 25 mm 耗材。".into()),
+        Model::P2 => return Err("标定标签需要 P2 的 40 × 30 mm 耗材。".into()),
+    };
+    let width_bytes = across as usize / 8;
+    let head_bytes = model.head_dots() as usize / 8;
+    let left = (head_bytes - width_bytes) / 2;
+    let ink = ink_mask(&svg)?;
+    let mut page = vec![0; head_bytes * along as usize];
+    let mut pixels = Vec::with_capacity(width_bytes * along as usize);
+    for (row, dots) in page
+        .chunks_exact_mut(head_bytes)
+        .zip(ink.chunks_exact(across as usize))
+    {
+        for (byte, group) in row[left..left + width_bytes]
+            .iter_mut()
+            .zip(dots.chunks_exact(8))
+        {
+            *byte = group
+                .iter()
+                .fold(0, |value, &black| (value << 1) | u8::from(black));
+            pixels.push(!*byte);
+        }
     }
-    pack_rotated(N1_RANGE_SVG, media, 96, 0, &Default::default())
+    let preview = grayscale_png(across, along, png::BitDepth::One, &pixels)?;
+    Ok(RangeLabel { page, preview })
 }
 
 pub fn packed_n1(svg: &str, media: &Media) -> Result<Vec<u8>, String> {
@@ -82,10 +145,6 @@ pub fn packed_n1(svg: &str, media: &Media) -> Result<Vec<u8>, String> {
         N1_FEED_SHIFT as usize,
         media.effective_cut(),
     )
-}
-
-pub fn packed_brother(svg: &str, media: &Media) -> Result<Vec<u8>, String> {
-    pack_rotated(svg, media, 128, 0, media.effective_cut())
 }
 
 pub fn packed_p2(svg: &str, media: &Media) -> Result<Vec<u8>, String> {
@@ -166,7 +225,7 @@ pub fn preview_png(packed: &[u8], media: &Media, head_dots: u32) -> Result<Strin
     }
     let left_margin = (head_dots - across) / 2;
     let cut = media.effective_cut();
-    let shaped = cut.feed_margin_mm > 0 || cut.radius_dots > 0 || !cut.regions_dots.is_empty();
+    let shaped = cut.radius_dots > 0 || !cut.regions_dots.is_empty();
     let bits = if shaped { 2 } else { 1 };
     let png_stride = (along * bits).div_ceil(8) as usize;
     // In 1-bit grayscale PNG, a set bit is white; on the head, it is black.
@@ -179,7 +238,7 @@ pub fn preview_png(packed: &[u8], media: &Media, head_dots: u32) -> Result<Strin
             if shaped {
                 let value = if black {
                     0
-                } else if !cut.contains(x as u32, y as u32, along, across) {
+                } else if !cut.inside_die(x as u32, y as u32, along, across) {
                     2
                 } else {
                     3
@@ -191,18 +250,28 @@ pub fn preview_png(packed: &[u8], media: &Media, head_dots: u32) -> Result<Strin
         }
     }
 
+    let depth = if shaped {
+        png::BitDepth::Two
+    } else {
+        png::BitDepth::One
+    };
+    grayscale_png(along, across, depth, &pixels)
+}
+
+fn grayscale_png(
+    width: u32,
+    height: u32,
+    depth: png::BitDepth,
+    pixels: &[u8],
+) -> Result<String, String> {
     let mut bytes = Vec::new();
     {
-        let mut encoder = png::Encoder::new(&mut bytes, along, across);
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
         encoder.set_color(png::ColorType::Grayscale);
-        encoder.set_depth(if shaped {
-            png::BitDepth::Two
-        } else {
-            png::BitDepth::One
-        });
+        encoder.set_depth(depth);
         let mut writer = encoder.write_header().map_err(|_| "无法生成点阵预览。")?;
         writer
-            .write_image_data(&pixels)
+            .write_image_data(pixels)
             .map_err(|_| "无法生成点阵预览。")?;
         writer.finish().map_err(|_| "无法生成点阵预览。")?;
     }
@@ -290,6 +359,62 @@ mod tests {
     }
 
     #[test]
+    fn calibration_feed_rows_and_head_bits_match_the_upright_preview() {
+        use crate::stock::Model;
+        for (model, media) in [
+            (Model::N1, Media::default()),
+            (Model::P2, Media::p2_40x30()),
+        ] {
+            let card = range_label(model, &media, true).unwrap();
+            let (h, w) = media.canvas_size();
+            let stride = model.head_dots() as usize / 8;
+            let margin = (stride - w as usize / 8) / 2;
+            assert_eq!(card.page.len(), h as usize * stride);
+            let mut dots = Vec::new();
+            for (y, row) in card.page.chunks_exact(stride).enumerate() {
+                assert!(row[..margin]
+                    .iter()
+                    .chain(&row[stride - margin..])
+                    .all(|&b| b == 0));
+                for x in 0..w as usize {
+                    if row[margin + x / 8] & (0x80 >> (x % 8)) != 0 {
+                        dots.push((x as u32, y as u32));
+                    }
+                }
+            }
+            assert_eq!(dots, preview_dots(&card.preview, (w, h)));
+            let at = |x: usize, y: usize| {
+                card.page[y * stride + margin + x / 8] & (0x80 >> (x % 8)) != 0
+            };
+            let (y_ruler_x, x_ruler_y, x_step_height, y_depth, x_depth) = match model {
+                Model::N1 => (39, 103, 2, 72, 48),
+                Model::P2 => (148, 104, 3, 80, 80),
+            };
+            for d in 0..y_depth {
+                for i in 0..8 {
+                    let x = y_ruler_x + 3 * i;
+                    assert_eq!(at(x, d), d % 8 == i);
+                    assert_eq!(at(x, h as usize - 1 - d), d % 8 == i);
+                }
+            }
+            for d in 0..x_depth {
+                for i in 0..8 {
+                    let y = x_ruler_y + x_step_height * i;
+                    assert_eq!(at(d, y), d % 8 == i);
+                    assert_eq!(at(w as usize - 1 - d, y), d % 8 == i);
+                }
+            }
+        }
+        let media = Media::p2_40x30();
+        assert_ne!(
+            range_label(Model::P2, &media, true).unwrap().page,
+            range_label(Model::P2, &media, false).unwrap().page
+        );
+        assert!(range_label(Model::N1, &media, true).is_err());
+        assert!(range_label(Model::P2, &Media::p2(), false).is_err());
+    }
+
+    #[test]
     fn n1_preview_includes_feed_correction_and_last_blank_column() {
         let media = Media::default();
         let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' width='200' height='96'>
@@ -354,7 +479,7 @@ mod tests {
 
 #[cfg(test)]
 #[test]
-fn silver_feed_preserves_ink_in_both_margins_and_shades_unused_margin() {
+fn silver_feed_preserves_ink_without_preset_margins() {
     use crate::core::builtin_media;
     let (_, media, _) = builtin_media()
         .iter()
@@ -373,11 +498,10 @@ fn silver_feed_preserves_ink_in_both_margins_and_shades_unused_margin() {
     let mut reader = png::Decoder::new(png.as_slice()).read_info().unwrap();
     let mut bytes = vec![0; reader.output_buffer_size()];
     let frame = reader.next_frame(&mut bytes).unwrap();
-    assert_eq!(frame.bit_depth, png::BitDepth::Two);
-    // The final dot is blank after the N1 one-dot feed correction.
-    for row in bytes.chunks_exact(50) {
-        assert_eq!(&row[..49], &[0; 49]);
-        assert_eq!(row[49], 0b0000_0010);
+    assert_eq!(frame.bit_depth, png::BitDepth::One);
+    for row in bytes.chunks_exact(25) {
+        assert_eq!(&row[..24], &[0; 24]);
+        assert_eq!(row[24], 1); // Blank final dot after the N1 feed correction.
     }
 }
 
@@ -392,33 +516,7 @@ fn die_cut_rejects_gap_and_rounded_corners() {
         ..Default::default()
     };
     assert!(cut.validate(28, 12).is_ok());
-    assert!(!cut.contains(0, 0, 28, 12));
-    assert!(!cut.contains(14, 6, 28, 12));
-    assert!(cut.contains(22, 6, 28, 12));
-}
-
-#[cfg(test)]
-#[test]
-fn calibration_marks_every_feed_row_at_its_unshifted_step() {
-    let page = n1_range_page(&Media::default()).unwrap();
-    assert_eq!(page.len(), 200 * 12);
-    for x in (0..72usize).chain(128..200) {
-        let distance = x.min(199 - x);
-        for step in 0..8 {
-            let head_dot = 95 - (28 + 4 * step);
-            let bit = page[x * 12 + head_dot / 8] & (0x80 >> (head_dot % 8));
-            assert_eq!(bit != 0, step == distance % 8, "row {x}, step {step}");
-        }
-    }
-    for y in 0..96usize {
-        let distance = y.min(95 - y);
-        let head_dot = 95 - y;
-        for step in 0..8 {
-            let x = 91 + step * 3;
-            assert_eq!(
-                page[x * 12 + head_dot / 8] & (0x80 >> (head_dot % 8)) != 0,
-                step == distance % 8
-            );
-        }
-    }
+    assert!(!cut.inside_die(0, 0, 28, 12));
+    assert!(!cut.inside_die(14, 6, 28, 12));
+    assert!(cut.inside_die(22, 6, 28, 12));
 }

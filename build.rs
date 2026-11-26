@@ -14,6 +14,7 @@ use stock::{Model, MAX_MEDIA_LENGTH_DOTS};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Label {
+    id: uuid::Uuid,
     name: Option<String>,
     #[serde(default)]
     barcodes: Vec<String>,
@@ -24,35 +25,30 @@ struct Label {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=labels.yaml");
+    println!("cargo:rerun-if-changed=assets/labels.yaml");
     println!("cargo:rerun-if-changed=src/stock.rs");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
-        && env::var_os("CARGO_FEATURE_DESKTOP").is_some()
-    {
-        println!("cargo:rerun-if-changed=src/brother_macos.m");
-        cc::Build::new()
-            .file("src/brother_macos.m")
-            .flag("-fobjc-arc")
-            .compile("brother_rfcomm");
-        println!("cargo:rustc-link-lib=framework=IOBluetooth");
-        println!("cargo:rustc-link-lib=framework=Foundation");
-    }
-    let yaml = fs::read_to_string("labels.yaml").expect("读取 labels.yaml");
+    let yaml = fs::read_to_string("assets/labels.yaml").expect("读取 assets/labels.yaml");
     let catalog: BTreeMap<Model, Vec<Label>> =
-        yaml_serde::from_str(&yaml).expect("解析 labels.yaml");
+        yaml_serde::from_str(&yaml).expect("解析 assets/labels.yaml");
     let mut generated = String::from("vec![\n");
-    for model in [Model::N1, Model::P2, Model::PtP300bt] {
+    let mut ids = BTreeSet::new();
+    for model in [Model::N1, Model::P2] {
         let entries = catalog
             .get(&model)
             .filter(|e| !e.is_empty())
-            .unwrap_or_else(|| panic!("labels.yaml 中 {model:?} 至少需要一个默认规格"));
+            .unwrap_or_else(|| panic!("assets/labels.yaml 中 {model:?} 至少需要一个默认规格"));
         let mut names = BTreeSet::new();
         let mut barcode_set = BTreeSet::new();
         for label in entries {
+            assert!(
+                !label.id.is_nil() && ids.insert(label.id),
+                "标签 UUID 无效或重复"
+            );
+            let id = label.id.as_u128();
             for code in &label.barcodes {
                 assert!(
                     !code.trim().is_empty() && barcode_set.insert(code),
-                    "labels.yaml 中 {model:?} 的耗材编码为空或重复：{code}"
+                    "assets/labels.yaml 中 {model:?} 的耗材编码为空或重复：{code}"
                 );
             }
             let barcodes = &label.barcodes;
@@ -63,25 +59,20 @@ fn main() {
                 .unwrap_or_else(|| format!("{model:?} · {w} × {h} mm"));
             assert!(
                 !name.trim().is_empty() && names.insert(name.clone()),
-                "labels.yaml 中 {model:?} 的规格名为空或重复：{name}"
+                "assets/labels.yaml 中 {model:?} 的规格名为空或重复：{name}"
             );
-            let width = if model == Model::PtP300bt {
-                assert_eq!(w, 12);
-                64
-            } else {
-                model.length_dots(w).min(model.head_dots())
-            };
-            let length = model.length_dots(h);
+            let width = stock::dots_at(w, stock::DPI).min(model.head_dots());
+            let length = stock::dots_at(h, stock::DPI);
             assert!(
                 width > 0 && (1..=MAX_MEDIA_LENGTH_DOTS).contains(&length),
-                "labels.yaml 中 {name} 的纸张尺寸超出范围"
+                "assets/labels.yaml 中 {name} 的纸张尺寸超出范围"
             );
             let cut = &label.cut;
             cut.validate(length, width)
-                .unwrap_or_else(|e| panic!("labels.yaml {name}: {e}"));
-            let cut=format!("crate::stock::Cut {{rounded:{:?},combined:{:?},radius_dots:{},feed_margin_mm:{},regions_dots:vec!{:?} }}",cut.rounded,cut.combined,cut.radius_dots,cut.feed_margin_mm,cut.regions_dots);
-            let dpi = model.dpi();
-            writeln!(generated,"(Model::{model:?}, Media {{ dpi:{dpi}, cut:{cut}, name: {name:?}.into(), width_mm: {w}, length_mm: {h}, printable_width_dots: {width}, printable_length_dots: {length} }}, &{barcodes:?}[..]),").unwrap();
+                .unwrap_or_else(|e| panic!("assets/labels.yaml {name}: {e}"));
+            let cut=format!("crate::stock::Cut {{rounded:{:?},combined:{:?},radius_dots:{},old_margin:(),regions_dots:vec!{:?} }}",cut.rounded,cut.combined,cut.radius_dots,cut.regions_dots);
+            let dpi = stock::DPI;
+            writeln!(generated,"(Model::{model:?}, Media {{ id:uuid::Uuid::from_u128({id}), dpi:{dpi}, cut:{cut}, name: {name:?}.into(), width_mm: {w}, length_mm: {h}, printable_width_dots: {width}, printable_length_dots: {length} }}, &{barcodes:?}[..]),").unwrap();
         }
     }
     generated.push(']');

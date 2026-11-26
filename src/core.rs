@@ -1,16 +1,13 @@
 use crate::symbol;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Write,
-};
+use std::{collections::BTreeMap, fmt::Write};
 
 use crate::stock::{dots_at, Model, DPI};
 pub use crate::stock::{MAX_MEDIA_LENGTH_DOTS, P2_HEAD_DOTS};
 pub const MAX_MEDIA_WIDTH_DOTS: u32 = P2_HEAD_DOTS;
 pub const MAX_BATCH: usize = 500;
 pub const MAX_FIELDS: usize = 24;
-const MAX_VALUE: usize = 4096;
+pub(crate) const MAX_VALUE: usize = 4096;
 pub type Row = BTreeMap<String, String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +16,19 @@ pub enum Kind {
     Qr,
     Barcode,
     Image,
+    Line,
+    Rectangle,
+    Ellipse,
+}
+
+impl Kind {
+    pub fn is_shape(self) -> bool {
+        matches!(self, Self::Line | Self::Rectangle | Self::Ellipse)
+    }
+}
+
+fn default_stroke() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +37,12 @@ pub struct Field {
     pub id: uuid::Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture: Option<crate::picture::Picture>,
+    #[serde(default)]
+    pub rotation: u16,
+    #[serde(default = "default_stroke")]
+    pub stroke_dots: u32,
+    #[serde(default)]
+    pub filled: bool,
     pub kind: Kind,
     pub text: String,
     pub x: i64,
@@ -36,10 +52,24 @@ pub struct Field {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module_size: Option<u32>,
 }
 
 impl Field {
+    pub fn swaps_axes(&self) -> bool {
+        matches!(self.rotation, 90 | 270)
+    }
+
+    pub fn footprint(&self) -> (u32, u32) {
+        if self.swaps_axes() {
+            (self.h, self.w)
+        } else {
+            (self.w, self.h)
+        }
+    }
+
     pub fn text_size(&self) -> u32 {
         self.font_size
             .unwrap_or_else(|| (self.h.saturating_mul(4) / 5).clamp(1, 32))
@@ -48,6 +78,8 @@ impl Field {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Media {
+    #[serde(default)]
+    pub id: uuid::Uuid,
     #[serde(default = "default_dpi")]
     pub dpi: u32,
     #[serde(default)]
@@ -88,6 +120,7 @@ impl Media {
     #[cfg(test)]
     pub fn p2() -> Self {
         Self {
+            id: uuid::Uuid::new_v4(),
             dpi: DPI,
             cut: Default::default(),
             name: "P2 test".into(),
@@ -101,6 +134,7 @@ impl Media {
     #[cfg(test)]
     pub fn p2_40x30() -> Self {
         Self {
+            id: uuid::Uuid::new_v4(),
             dpi: DPI,
             cut: Default::default(),
             name: "P2 small test".into(),
@@ -157,8 +191,8 @@ impl Media {
             return Err(format!("可印尺寸须为横向 1～{MAX_MEDIA_WIDTH_DOTS} 点、走纸方向 1～{MAX_MEDIA_LENGTH_DOTS} 点。"));
         }
         self.effective_cut().validate(along, across)?;
-        if !matches!(self.dpi, 180 | 203) {
-            return Err("标签规格需要 180 或 203 dpi。".into());
+        if self.dpi != DPI {
+            return Err("标签规格需要 203 dpi。".into());
         }
         if across > dots_at(self.width_mm, self.dpi) || along > dots_at(self.length_mm, self.dpi) {
             return Err(format!("可印尺寸不能超过纸面尺寸（{} dpi）。", self.dpi));
@@ -169,6 +203,8 @@ impl Media {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Template {
+    #[serde(default)]
+    pub id: uuid::Uuid,
     pub name: String,
     #[serde(default = "legacy_media")]
     pub media: Media,
@@ -183,6 +219,7 @@ fn legacy_media() -> Media {
         length_mm: 50,
         printable_width_dots: 96,
         printable_length_dots: 400,
+        id: uuid::Uuid::new_v4(),
         dpi: DPI,
         cut: Default::default(),
     }
@@ -191,6 +228,7 @@ fn legacy_media() -> Media {
 impl Default for Template {
     fn default() -> Self {
         Self {
+            id: uuid::Uuid::new_v4(),
             name: "物料标签".into(),
             media: Media::default(),
             elements: Vec::new(),
@@ -198,17 +236,33 @@ impl Default for Template {
     }
 }
 
+impl Template {
+    pub fn duplicate(&self) -> Self {
+        let mut copy = self.clone();
+        copy.id = uuid::Uuid::new_v4();
+        for field in &mut copy.elements {
+            field.id = uuid::Uuid::new_v4();
+        }
+        copy
+    }
+}
+
 #[cfg(test)]
 impl Template {
     pub(crate) fn example() -> Self {
         Self {
+            id: uuid::Uuid::new_v4(),
             name: "物料标签".into(),
             media: Media::default(),
             elements: vec![
                 Field {
+                    rotation: 0,
+                    stroke_dots: 1,
+                    filled: false,
                     id: uuid::Uuid::new_v4(),
                     picture: None,
                     kind: Kind::Text,
+                    font_family: None,
                     font_size: Some(22),
                     module_size: None,
                     text: "物料 {seq}".into(),
@@ -218,9 +272,13 @@ impl Template {
                     h: 28,
                 },
                 Field {
+                    rotation: 0,
+                    stroke_dots: 1,
+                    filled: false,
                     id: uuid::Uuid::new_v4(),
                     picture: None,
                     kind: Kind::Barcode,
+                    font_family: None,
                     font_size: None,
                     module_size: Some(2),
                     text: "P-{seq}".into(),
@@ -230,9 +288,13 @@ impl Template {
                     h: 43,
                 },
                 Field {
+                    rotation: 0,
+                    stroke_dots: 1,
+                    filled: false,
                     id: uuid::Uuid::new_v4(),
                     picture: None,
                     kind: Kind::Qr,
+                    font_family: None,
                     font_size: None,
                     module_size: Some(4),
                     text: "P-{seq}".into(),
@@ -284,7 +346,7 @@ impl Template {
             for item in &mut draft.elements {
                 match item.kind {
                     Kind::Text => item.w = 220,
-                    Kind::Image => (),
+                    Kind::Image | Kind::Line | Kind::Rectangle | Kind::Ellipse => (),
                     Kind::Barcode => {
                         item.w = 220;
                         item.text = "{seq}".into();
@@ -337,61 +399,39 @@ impl Sequence {
     }
 }
 
-pub fn parse_csv(input: &str) -> Result<Vec<Row>, String> {
-    if input.len() > 2 * 1024 * 1024 {
-        return Err("CSV 文件不得超过 2 MB。".into());
-    }
-    if input.trim().is_empty() {
-        return Err("CSV 为空。".into());
-    }
-    let mut reader =
-        csv::ReaderBuilder::new().from_reader(input.trim_start_matches('\u{feff}').as_bytes());
-    let headers = reader
-        .headers()
-        .map_err(|e| format!("CSV 表头错误：{e}"))?
-        .clone();
-    let headers: Vec<_> = headers.iter().map(str::trim).collect();
-    if headers.is_empty() || headers.len() > 64 {
-        return Err("CSV 需要 1～64 列。".into());
-    }
-    let mut seen = BTreeSet::new();
-    for h in &headers {
-        if h.is_empty()
-            || *h == "seq"
-            || h.len() > 128
-            || h.chars().any(|c| c.is_control() || c == '{' || c == '}')
-        {
-            return Err("CSV 列名不得为空、包含大括号或使用保留字段 seq。".into());
-        }
-        if !seen.insert(*h) {
-            return Err(format!("CSV 列名重复：{h}"));
-        }
-    }
-    let mut rows = Vec::new();
-    for (i, record) in reader.records().enumerate() {
-        if i == MAX_BATCH {
-            return Err(format!("单批最多 {MAX_BATCH} 条。"));
-        }
-        let record = record.map_err(|e| format!("CSV 第 {} 条数据无法读取：{e}", i + 1))?;
-        if record.iter().any(|s| s.len() > MAX_VALUE) {
-            return Err(format!("CSV 第 {} 条数据存在过长字段。", i + 1));
-        }
-        rows.push(
-            headers
-                .iter()
-                .copied()
-                .zip(record.iter())
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                .collect(),
-        );
-    }
-    if rows.is_empty() {
-        return Err("CSV 没有数据行。".into());
-    }
-    Ok(rows)
+pub fn materialize(source: &str, row: &Row, seq: &str) -> Result<String, String> {
+    expand_fields(source, |name, out| {
+        let value = if name == "seq" {
+            seq
+        } else {
+            row.get(name).ok_or_else(|| format!("缺少字段：{name}"))?
+        };
+        out.push_str(value);
+        Ok(())
+    })
 }
 
-pub fn materialize(source: &str, row: &Row, seq: &str) -> Result<String, String> {
+pub fn variable_names(template: &Template) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in template
+        .elements
+        .iter()
+        .filter(|item| matches!(item.kind, Kind::Text | Kind::Qr | Kind::Barcode))
+    {
+        let _ = expand_fields(&item.text, |name, _| {
+            if name != "seq" && !names.iter().any(|n| n == name) {
+                names.push(name.to_owned());
+            }
+            Ok(())
+        });
+    }
+    names
+}
+
+fn expand_fields(
+    source: &str,
+    mut field_value: impl FnMut(&str, &mut String) -> Result<(), String>,
+) -> Result<String, String> {
     if source.len() > MAX_VALUE {
         return Err("内容太长。".into());
     }
@@ -416,14 +456,7 @@ pub fn materialize(source: &str, row: &Row, seq: &str) -> Result<String, String>
                         _ => return Err("字段占位符格式错误；字面大括号用 {{ 或 }}。".into()),
                     }
                 }
-                if field == "seq" {
-                    out.push_str(seq);
-                } else {
-                    out.push_str(
-                        row.get(&field)
-                            .ok_or_else(|| format!("缺少 CSV 字段：{field}"))?,
-                    );
-                }
+                field_value(&field, &mut out)?;
             }
             '}' => return Err("字段占位符格式错误；字面大括号用 {{ 或 }}。".into()),
             c => out.push(c),
@@ -442,10 +475,20 @@ pub(crate) fn validate_template(template: &Template) -> Result<(), String> {
         return Err(format!("模板最多可包含 {MAX_FIELDS} 个元素。"));
     }
     for (idx, field) in template.elements.iter().enumerate() {
+        if field.kind.is_shape() && field.stroke_dots == 0 {
+            return Err(format!("元素 {} 的线宽必须大于零。", idx + 1));
+        }
+        if !matches!(field.rotation, 0 | 90 | 180 | 270) {
+            return Err(format!(
+                "元素 {} 的旋转角度须为 0、90、180 或 270 度。",
+                idx + 1
+            ));
+        }
+        let (width, height) = field.footprint();
         if field.w == 0
             || field.h == 0
-            || field.x.checked_add(i64::from(field.w)).is_none()
-            || field.y.checked_add(i64::from(field.h)).is_none()
+            || field.x.checked_add(i64::from(width)).is_none()
+            || field.y.checked_add(i64::from(height)).is_none()
         {
             return Err(format!("元素 {} 的尺寸为 0 或坐标超出范围。", idx + 1));
         }
@@ -480,7 +523,7 @@ struct TextInk {
 }
 
 impl TextInk {
-    fn shape(content: &str, font_size: u32) -> Result<Self, String> {
+    fn shape(content: &str, font_size: u32, font_family: Option<&str>) -> Result<Self, String> {
         use resvg::usvg::{Node, Options, Tree};
         if content
             .chars()
@@ -488,8 +531,12 @@ impl TextInk {
         {
             return Err("文字只支持单行可打印字符。".into());
         }
+        let family = match font_family {
+            Some(name) => format!("{}, sans-serif", xml_text(&format!("{name:?}"))),
+            None => "sans-serif".into(),
+        };
         let escaped = xml_text(content);
-        let source = format!("<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'><text font-family='sans-serif' font-size='{font_size}' xml:space='preserve'>{escaped}</text></svg>");
+        let source = format!("<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'><text font-family='{family}' font-size='{font_size}' xml:space='preserve'>{escaped}</text></svg>");
         let options = Options {
             fontdb: crate::raster::fonts(),
             ..Default::default()
@@ -519,7 +566,7 @@ impl TextInk {
 
 #[cfg(test)]
 fn text_dimensions(content: &str, font_size: u32) -> Result<(u32, u32), String> {
-    Ok(TextInk::shape(content, font_size)?.size)
+    Ok(TextInk::shape(content, font_size, None)?.size)
 }
 
 fn xml_text(s: &str) -> String {
@@ -544,6 +591,20 @@ struct Artwork {
 
 impl Artwork {
     fn new(field: &Field, row: &Row, serial: &str, index: usize) -> Result<Self, String> {
+        let mut art = Self::unrotated(field, row, serial, index)?;
+        let transform = match field.rotation {
+            0 => return Ok(art),
+            90 => format!("translate({} 0) rotate(90)", art.bounds.h),
+            180 => format!("translate({} {}) rotate(180)", art.bounds.w, art.bounds.h),
+            270 => format!("translate(0 {}) rotate(270)", art.bounds.w),
+            _ => return Err("元素旋转角度无效。".into()),
+        };
+        let (w, h) = art.bounds.footprint();
+        art.image = format!("<svg xmlns='http://www.w3.org/2000/svg' width='{w}' height='{h}'><g transform='{transform}'>{}</g></svg>", art.image);
+        Ok(art)
+    }
+
+    fn unrotated(field: &Field, row: &Row, serial: &str, index: usize) -> Result<Self, String> {
         if field.kind == Kind::Image {
             let picture = field.picture.as_ref().ok_or("缺少图片数据。")?;
             return Ok(Self {
@@ -551,15 +612,41 @@ impl Artwork {
                 image: picture.svg(field.w, field.h)?,
             });
         }
+        if field.kind.is_shape() {
+            let (w, h) = (field.w, field.h);
+            let solid = field.kind == Kind::Line
+                || field.filled
+                || field.stroke_dots.saturating_mul(2) >= w.min(h);
+            let stroke = if solid { 0 } else { field.stroke_dots };
+            let inset = f64::from(stroke) / 2.0;
+            let (inner_w, inner_h) = (w - stroke, h - stroke);
+            let fill = if solid { "black" } else { "none" };
+            let attrs = format!("fill='{fill}' stroke='black' stroke-width='{stroke}'");
+            let shape = if field.kind == Kind::Ellipse {
+                format!(
+                    "<ellipse cx='{}' cy='{}' rx='{}' ry='{}' {attrs}/>",
+                    f64::from(w) / 2.0,
+                    f64::from(h) / 2.0,
+                    f64::from(inner_w) / 2.0,
+                    f64::from(inner_h) / 2.0
+                )
+            } else {
+                format!(
+                    "<rect x='{inset}' y='{inset}' width='{inner_w}' height='{inner_h}' {attrs}/>"
+                )
+            };
+            return Ok(Self { bounds:field.clone(), image:format!("<svg xmlns='http://www.w3.org/2000/svg' width='{w}' height='{h}'>{shape}</svg>") });
+        }
         let content = materialize(&field.text, row, serial)?;
         if content.trim().is_empty() {
             return Err("内容为空。".into());
         }
         let mut image = String::new();
         let bounds = match field.kind {
-            Kind::Image => unreachable!(),
+            Kind::Image | Kind::Line | Kind::Rectangle | Kind::Ellipse => unreachable!(),
             Kind::Text => {
-                let ink = TextInk::shape(&content, field.text_size())?;
+                let ink =
+                    TextInk::shape(&content, field.text_size(), field.font_family.as_deref())?;
                 let mut bounds = field.clone();
                 (bounds.w, bounds.h) = ink.size;
                 bounds.font_size = Some(field.text_size());
@@ -637,14 +724,16 @@ pub fn check_overlap(items: &[(Field, Option<String>)]) -> Result<(), String> {
                 continue;
             }
             let b = other.0;
+            let (aw, ah) = a.footprint();
+            let (bw, bh) = b.footprint();
             let x0 = a.x.max(b.x);
             let y0 = a.y.max(b.y);
             let x1 =
-                a.x.saturating_add(i64::from(a.w))
-                    .min(b.x.saturating_add(i64::from(b.w)));
+                a.x.saturating_add(i64::from(aw))
+                    .min(b.x.saturating_add(i64::from(bw)));
             let y1 =
-                a.y.saturating_add(i64::from(a.h))
-                    .min(b.y.saturating_add(i64::from(b.h)));
+                a.y.saturating_add(i64::from(ah))
+                    .min(b.y.saturating_add(i64::from(bh)));
             if x0 >= x1 || y0 >= y1 {
                 continue;
             }
@@ -657,8 +746,8 @@ pub fn check_overlap(items: &[(Field, Option<String>)]) -> Result<(), String> {
             let other_mask = masks[j].as_ref().unwrap();
             for y in y0..y1 {
                 for x in x0..x1 {
-                    if other_mask[((y - b.y) * i64::from(b.w) + (x - b.x)) as usize]
-                        && !target_mask[((y - a.y) * i64::from(a.w) + (x - a.x)) as usize]
+                    if other_mask[((y - b.y) * i64::from(bw) + (x - b.x)) as usize]
+                        && !target_mask[((y - a.y) * i64::from(aw) + (x - a.x)) as usize]
                     {
                         return Err(format!(
                             "元素 {} 的墨点遮挡了元素 {} 的码图，请调整位置。",
@@ -675,6 +764,7 @@ pub fn check_overlap(items: &[(Field, Option<String>)]) -> Result<(), String> {
 
 /// Check the resolved element for this record against the same geometry as the print head.
 pub fn outside_media(media: &Media, field: &Field, artwork: Option<&str>, shift: u32) -> bool {
+    let (width, height) = field.footprint();
     let (w, h) = media.canvas_size();
     if field.x < 0 || field.y < 0 || field.x >= i64::from(w) || field.y >= i64::from(h) {
         return true;
@@ -684,22 +774,21 @@ pub fn outside_media(media: &Media, field: &Field, artwork: Option<&str>, shift:
     };
     if field
         .x
-        .checked_add(i64::from(field.w))
+        .checked_add(i64::from(width))
         .is_none_or(|end| end > i64::from(w))
         || field
             .y
-            .checked_add(i64::from(field.h))
+            .checked_add(i64::from(height))
             .is_none_or(|end| end > i64::from(h))
     {
         return true;
     }
     let (left, top) = (field.x as u32, field.y as u32);
     let cut = media.effective_cut();
-    let margin = crate::stock::dots(cut.feed_margin_mm);
     if cut.radius_dots == 0
         && cut.regions_dots.is_empty()
-        && left >= shift + margin
-        && left + field.w <= w.saturating_sub(margin) + shift
+        && left >= shift
+        && left + width <= w + shift
     {
         return false;
     }
@@ -707,11 +796,11 @@ pub fn outside_media(media: &Media, field: &Field, artwork: Option<&str>, shift:
         return false;
     };
     mask.iter().enumerate().any(|(i, &black)| {
-        let x = left + (i as u32 % field.w);
-        let y = top + (i as u32 / field.w);
+        let x = left + (i as u32 % width);
+        let y = top + (i as u32 / width);
         black
             && x.checked_sub(shift)
-                .is_none_or(|px| !cut.contains(px, y, w, h))
+                .is_none_or(|px| !cut.inside_die(px, y, w, h))
     })
 }
 
@@ -782,6 +871,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shape_masks_preserve_edges_holes_and_rotation() {
+        let mut f = Template::example().elements.remove(0);
+        f.text.clear();
+        (f.w, f.h) = (20, 10);
+        for kind in [Kind::Line, Kind::Rectangle, Kind::Ellipse] {
+            f.kind = kind;
+            f.rotation = 90;
+            f.filled = false;
+            let (_, svg) = editor_art(&f, &Row::new(), "1", 0).unwrap();
+            let mask = crate::raster::ink_mask(&svg).unwrap();
+            assert_eq!(mask.len(), 200);
+            assert_eq!(mask[10 * 10 + 5], kind == Kind::Line);
+            assert!(mask.iter().any(|dot| *dot));
+            f.filled = true;
+            let (_, svg) = editor_art(&f, &Row::new(), "1", 0).unwrap();
+            assert!(crate::raster::ink_mask(&svg).unwrap()[105]);
+        }
+    }
+
+    #[test]
+    fn template_form_uses_distinct_unescaped_variables_in_layout_order() {
+        let mut t = Template::example();
+        t.elements[0].text = "{{名称}} {编号}-{seq}".into();
+        t.elements[1].text = "{批号}/{编号}".into();
+        t.elements[2].text = "{批号}".into();
+        assert_eq!(variable_names(&t), ["编号", "批号"]);
+    }
+
+    #[test]
+    fn rotated_barcode_keeps_anchor_and_turns_each_ink_dot() {
+        let mut field = Template::example()
+            .elements
+            .into_iter()
+            .find(|f| f.kind == Kind::Barcode)
+            .unwrap();
+        field.text = "1234".into();
+        let row = Row::new();
+        let (base, svg) = editor_art(&field, &row, "", 0).unwrap();
+        let mask = crate::raster::ink_mask(&svg).unwrap();
+        let (w, h) = (base.w as usize, base.h as usize);
+        for angle in [90, 180, 270] {
+            field.rotation = angle;
+            let (turned, svg) = editor_art(&field, &row, "", 0).unwrap();
+            assert_eq!((turned.x, turned.y), (base.x, base.y));
+            let result = crate::raster::ink_mask(&svg).unwrap();
+            for y in 0..h {
+                for x in 0..w {
+                    let index = match angle {
+                        90 => x * h + h - 1 - y,
+                        180 => (h - 1 - y) * w + w - 1 - x,
+                        _ => (w - 1 - x) * h + y,
+                    };
+                    assert_eq!(result[index], mask[y * w + x]);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn draft_uses_the_print_art_and_keeps_drawable_parts_of_unfinished_labels() {
         let mut template = Template::example();
         let row = Row::new();
@@ -834,6 +982,12 @@ mod tests {
         }
     }
 
+    fn parse_csv(input: &str) -> Result<Vec<Row>, String> {
+        let table = crate::table::Table::from_csv(input)?;
+        let columns = table.match_columns(&table.headers);
+        table.mapped_rows(&table.headers, &columns, &Row::new())
+    }
+
     #[test]
     fn csv_sequence_and_mixed_arts_at_entry_point() {
         let rows = parse_csv("\u{feff}item,code\r\n\"A, B\",AB1\r\n物料,CD2\r\n").unwrap();
@@ -876,12 +1030,17 @@ mod tests {
             "{<g>{seq}</g>}"
         );
         let t = Template {
+            id: uuid::Uuid::new_v4(),
             name: "test".into(),
             media: Media::default(),
             elements: vec![Field {
+                rotation: 0,
+                stroke_dots: 1,
+                filled: false,
                 id: uuid::Uuid::new_v4(),
                 picture: None,
                 kind: Kind::Text,
+                font_family: None,
                 font_size: Some(22),
                 module_size: None,
                 text: "{a}".into(),
@@ -1003,9 +1162,8 @@ mod tests {
     }
 
     #[test]
-    fn oversized_or_ambiguous_csv_invalid() {
+    fn malformed_or_oversized_csv_invalid() {
         assert!(parse_csv("a,a\n1,2\n").is_err());
-        assert!(parse_csv("a,seq\nx,1\n").is_err());
         assert!(parse_csv("a,b\na\n").is_err());
         assert!(parse_csv(&format!("a\n{}", "x\n".repeat(MAX_BATCH + 1))).is_err());
     }
@@ -1046,6 +1204,7 @@ mod tests {
     fn media_change_clips_existing_layout() {
         let mut template = Template::example();
         template.media = Media {
+            id: uuid::Uuid::new_v4(),
             dpi: DPI,
             cut: Default::default(),
             name: "窄标签，仅导出".into(),
@@ -1076,7 +1235,7 @@ fn blank_default_and_cleanup_on_silver_stock() {
         .find(|(_, _, codes)| codes.contains(&"05262201"))
         .unwrap();
     let mut field = Template::example().elements.remove(0);
-    field.x = 8;
+    field.x = 0;
     field.y = 10;
     field.w = 2;
     field.h = 1;
