@@ -32,7 +32,7 @@ fn main() {
         yaml_serde::from_str(&yaml).expect("解析 assets/labels.yaml");
     let mut generated = String::from("vec![\n");
     let mut ids = BTreeSet::new();
-    for model in [Model::N1, Model::P2] {
+    for model in [Model::N1, Model::P2, Model::P0] {
         let entries = catalog
             .get(&model)
             .filter(|e| !e.is_empty())
@@ -61,7 +61,10 @@ fn main() {
                 !name.trim().is_empty() && names.insert(name.clone()),
                 "assets/labels.yaml 中 {model:?} 的规格名为空或重复：{name}"
             );
-            let width = stock::dots_at(w, stock::DPI).min(model.head_dots());
+            let paper_width = stock::dots_at(w, stock::DPI);
+            let width = model
+                .head_dots()
+                .map_or(paper_width, |head| paper_width.min(head));
             let length = stock::dots_at(h, stock::DPI);
             assert!(
                 width > 0 && (1..=MAX_MEDIA_LENGTH_DOTS).contains(&length),

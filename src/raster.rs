@@ -107,11 +107,12 @@ pub fn range_label(
                 .replace(">P2<", if usb { ">P2 USB<" } else { ">P2 BLE<" })
                 .into()
         }
+        Model::P0 => return Err("P0 仅支持编辑和预览。".into()),
         Model::N1 => return Err("标定标签需要 N1 的 12 × 25 mm 耗材。".into()),
         Model::P2 => return Err("标定标签需要 P2 的 40 × 30 mm 耗材。".into()),
     };
     let width_bytes = across as usize / 8;
-    let head_bytes = model.head_dots() as usize / 8;
+    let head_bytes = model.head_dots().unwrap() as usize / 8;
     let left = (head_bytes - width_bytes) / 2;
     let ink = ink_mask(&svg)?;
     let mut page = vec![0; head_bytes * along as usize];
@@ -367,7 +368,7 @@ mod tests {
         ] {
             let card = range_label(model, &media, true).unwrap();
             let (h, w) = media.canvas_size();
-            let stride = model.head_dots() as usize / 8;
+            let stride = model.head_dots().unwrap() as usize / 8;
             let margin = (stride - w as usize / 8) / 2;
             assert_eq!(card.page.len(), h as usize * stride);
             let mut dots = Vec::new();
@@ -388,6 +389,7 @@ mod tests {
             };
             let (y_ruler_x, x_ruler_y, x_step_height, y_depth, x_depth) = match model {
                 Model::N1 => (39, 103, 2, 72, 48),
+                Model::P0 => unreachable!(),
                 Model::P2 => (148, 104, 3, 80, 80),
             };
             for d in 0..y_depth {

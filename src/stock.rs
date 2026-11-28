@@ -14,13 +14,15 @@ pub enum Model {
     #[default]
     N1,
     P2,
+    P0,
 }
 
 impl Model {
-    pub fn head_dots(self) -> u32 {
+    pub fn head_dots(self) -> Option<u32> {
         match self {
-            Self::N1 => N1_HEAD_DOTS,
-            Self::P2 => P2_HEAD_DOTS,
+            Self::N1 => Some(N1_HEAD_DOTS),
+            Self::P2 => Some(P2_HEAD_DOTS),
+            Self::P0 => None,
         }
     }
 }

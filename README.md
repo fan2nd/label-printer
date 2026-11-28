@@ -51,6 +51,8 @@ target/release/label-printer preview p2 /tmp/label.png --saved '物料标签' --
 
 ## 元器件模板
 
+德佟 P0 的 12 × 30 mm 和 12 × 22 mm 圆角纸各有电阻、电容、MOS 管和三极管料盒模板。选好规格后在「模板」中点选即可。
+
 精臣 N1 的 12 × 25 mm 圆角亚银标签（耗材编码 05262201）内置五款模板：电阻料盒、电容料盒、阻容分装、三极管料盒和 MOS 管料盒。在「模板」里点选后，可在「数据」修改示例值，也可导入 Excel 或 CSV 批量打印。每张两行。首行显示阻容值或型号，次行显示封装与识别所需的精度、耐压、批次、极性或沟道。内置布局和示例值见[模板库](assets/templates.json)。
 
 ```sh
@@ -109,7 +111,7 @@ cargo test --no-default-features --features ble --locked
 | 型号 | 可核查的实现或实机记录 | 本项目状态 |
 | --- | --- | --- |
 | 精臣 N1 | 本项目使用 Rust 实现 USB 串口和 BLE 通信、图像旋转和点阵发送。[USB 驱动](src/printer/usb.rs) · [第三方串口实现](https://github.com/MultiMote/niimbluelib/blob/main/src/client/serial_impl.ts) · [设备入口](src/device.rs) · [协议实现](src/printer.rs) · [点阵转换](src/raster.rs) · [第三方协议参考](https://www.npmjs.com/package/niimbot-web-bluetooth/v/2.6.0) · [许可声明](THIRD-PARTY-NIIMBOT.txt) | 已实现上位机驱动，待本项目实机验收。 |
-| 德佟 P0 | 已查阅的第三方项目分别记录了 P2 蓝牙打印和 DP27P USB 打印，尚缺 P0 的点阵格式、传输与出纸记录。[P2 协议项目](https://github.com/IvanLi-CN/detonger) · [DP27P 驱动](https://github.com/sb-child/dz-print) | 待验证。 |
+| 德佟 P0 | 已查阅的第三方项目分别记录了 P2 蓝牙打印和 DP27P USB 打印，尚缺 P0 的点阵格式、传输与出纸记录。[P2 协议项目](https://github.com/IvanLi-CN/detonger) · [DP27P 驱动](https://github.com/sb-child/dz-print) | 内置 12 × 30 mm、12 × 22 mm 单张圆角规格，可编辑和预览。打印协议待验证。 |
 | 德佟 P1 / DT01 | 第三方实机抓包记录显示，打印使用经典蓝牙 RFCOMM 通道 1，BLE 可读取状态和计数器。其 Python 打印入口默认选择 `sdk-compact`，编码器会加载随附 SDK。可参考独立抓包记录和传输逻辑。[逆向记录](https://github.com/NicoSeg735/label-printer/blob/main/HISTORIAL_INVESTIGACION.md) · [传输源码](https://github.com/NicoSeg735/label-printer/blob/main/printer.py) | 仅作协议研究。无厂商 SDK 的完整编码与出纸链路待验证。 |
 | 德佟 P2 | 第三方 Rust 项目报告在 P2 上测试了 BLE 打印。协议编码与传输分包实现，公开入口有 `scan`、`connect` 和 `PrinterConnection::print_png`。[项目与测试型号](https://github.com/IvanLi-CN/detonger) · [Rust API](https://github.com/IvanLi-CN/detonger/blob/3ef5904738bb528e8145ab3b9eb71bafc542341f/crates/detonger-printer/src/lib.rs) · [帧格式与点阵编码](https://github.com/IvanLi-CN/detonger/blob/3ef5904738bb528e8145ab3b9eb71bafc542341f/docs/protocol.md) | 本项目依据公开协议独立实现 BLE 驱动，安装时无需上游库。除第三方记录的 49535343 系列外，实机还发现 FF00 服务下的 FF02 可写特征。该通道已用于实机标定试打。[本项目 P2 驱动](src/p2.rs) · [BLE 服务与特征说明](https://github.com/IvanLi-CN/detonger/blob/3ef5904738bb528e8145ab3b9eb71bafc542341f/docs/ble.md) |
 

@@ -9,12 +9,13 @@ use std::path::PathBuf;
 
 impl ValueEnum for Model {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::N1, Self::P2]
+        &[Self::N1, Self::P2, Self::P0]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
         Some(clap::builder::PossibleValue::new(match self {
             Self::N1 => "n1",
             Self::P2 => "p2",
+            Self::P0 => "p0",
         }))
     }
 }
@@ -162,7 +163,7 @@ impl Content {
             }
             _ => return Err("请选择 --text、--template 或 --saved 作为唯一内容来源。".into()),
         };
-        if !model.supports(&template.media) {
+        if model != Model::P0 && !model.supports(&template.media) {
             return Err("模板的标签规格与机型不匹配。".into());
         }
         let svg = core::render_svg(&template, &row, seq.as_deref().unwrap_or("0001"))?;
@@ -228,6 +229,9 @@ pub fn run() -> Result<(), String> {
             content,
         } => {
             let (svg, media) = content.render(model)?;
+            if model == Model::P0 {
+                return Err("P0 仅支持编辑和预览。".into());
+            }
             if density.is_some() && model != Model::P2 {
                 return Err("--density 仅适用于 P2。".into());
             }

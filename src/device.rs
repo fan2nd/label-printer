@@ -8,11 +8,13 @@ impl Model {
         match self {
             Self::N1 => "N1",
             Self::P2 => "P2",
+            Self::P0 => "P0",
         }
     }
 
     pub fn supported_stock(self) -> &'static str {
         match self {
+            Self::P0 => "12 × 30 mm、12 × 22 mm 圆角标签",
             Self::N1 => "12 × 25 mm 标签",
             Self::P2 => "纸宽至多 57 mm、可印宽至多 384 点的间隙标签",
         }
@@ -20,6 +22,7 @@ impl Model {
 
     pub fn supports(self, media: &Media) -> bool {
         match self {
+            Self::P0 => false,
             Self::N1 => media.is_known_n1(),
             Self::P2 => media.supports_p2(),
         }
@@ -30,6 +33,7 @@ impl Model {
             return Err(format!("请为 {} 选择支持的标签规格。", self.name()));
         }
         match self {
+            Self::P0 => Err("P0 仅支持编辑和预览。".into()),
             Self::N1 => raster::packed_n1(svg, media),
             Self::P2 => raster::packed_p2(svg, media),
         }
@@ -49,11 +53,12 @@ impl Model {
             return raster::stock_preview_png(svg, media);
         }
         let packed = self.rasterize(svg, media)?;
-        raster::preview_png(&packed, media, self.head_dots())
+        raster::preview_png(&packed, media, self.head_dots().unwrap())
     }
 
     pub async fn connect(self, use_usb: bool, usb_port: Option<String>) -> Result<Device, String> {
         match (self, usb_port) {
+            (Self::P0, _) => Err("P0 仅支持编辑和预览。".into()),
             (Self::N1, Some(port)) => printer::Printer::connect_usb(port).await.map(Device::N1),
             (Self::N1, None) => printer::Printer::connect().await.map(Device::N1),
             (Self::P2, _) if use_usb => p2::usb::Printer::connect().await.map(Device::P2Usb),

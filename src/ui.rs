@@ -630,7 +630,7 @@ pub fn App() -> Element {
                     div { class:"device-choice", select { class:"printer-model", "aria-label":"打印机型号", disabled:is_busy || linked, value:"{model_name}", onchange: move |e| {
                         if busy() || connection.read().is_some() { return; }
                         let next = match e.value().as_str() {
-                            "P2" => Model::P2, "N1" => Model::N1, _ => return,
+                            "P0" => Model::P0, "P2" => Model::P2, "N1" => Model::N1, _ => return,
                         };
                         let builtin = core::builtin_media().iter().any(|(_, m, _)| *m == template.read().media);
                         if builtin { template.write().media = Media::for_model(next); }
@@ -639,15 +639,17 @@ pub fn App() -> Element {
                         page.set(0);
                     },
                         option { value:"N1", "精臣 N1" }
+                        option { value:"P0", "德佟 P0（仅排版）" }
                         option { value:"P2", "德佟 P2" }
                     } }
-                        div { class:"transport-picker", role:"group","aria-label":"连接方式",
+                        if model != Model::P0 { div { class:"transport-picker", role:"group","aria-label":"连接方式",
                             for (usb,label) in [(false,"蓝牙"),(true,"USB")] {
                                 button {r#type:"button",disabled:is_busy,"aria-pressed":usb_mode()==usb,onclick:move |_| {
                                     usb_mode.set(usb);
                                     if usb && model==Model::N1 { refresh_ports(); }
                                 },"{label}"}
                             }
+                        }
                         }
                         if usb_mode() && model == Model::N1 {
                             div { class:"device-choice port-choice", select { class:"usb-port", title:"{usb_port}", "aria-label":"USB 串口", disabled:is_busy || linked, value:"{usb_port}", onchange:move |e| usb_port.set(e.value()),
@@ -661,7 +663,7 @@ pub fn App() -> Element {
                         }
                     }
                     if linked { span { class:"status good", "{model_name} · {transport} 已连接" } }
-                    button { id:"connect-printer", r#type: "button", disabled: is_busy || (!linked && model == Model::N1 && usb_mode() && usb_port.read().is_empty()), onclick: move |_| {
+                    button { id:"connect-printer", hidden:model == Model::P0, r#type: "button", disabled: is_busy || (!linked && model == Model::N1 && usb_mode() && usb_port.read().is_empty()), onclick: move |_| {
                         if busy() { return; }
                         busy.set(true);
                         let previous = connection.write().take();
@@ -905,7 +907,7 @@ pub fn App() -> Element {
                             }
                         }
                     }
-                    if !supported_media {
+                    if model == Model::P0 { p {class:"muted","P0 仅支持编辑和预览。"} } else if !supported_media {
                         p { class: "muted", "当前规格仅可预览。{model_name} 支持 {supported_stock}。" }
                     }
                     if template.read().elements.is_empty() {
@@ -1083,13 +1085,15 @@ pub fn App() -> Element {
                     }
                     if inspector_tab()=="模板" {
                     section { class: "region", "aria-label":"模板库",
-                        if model == Model::N1 {
-                            span {class:"muted","12 × 25 mm 亚银纸"}
-                            div {class:"actions",for preset in storage::presets() {
-                                button {key:"{preset.template.name}",r#type:"button",disabled:is_busy,onclick:move |_| {
-                                    load_template(preset.template.duplicate(),preset.values.clone());
-                                },"{preset.template.name}"}
-                            } }
+                        for (stock_model, stock, _) in core::builtin_media() {
+                            if *stock_model == model && (model == Model::N1 || stock.id == media.id) && storage::presets().iter().any(|p| p.template.media.id == stock.id) {
+                                span {class:"muted","{stock.name}"}
+                                div {class:"actions",for preset in storage::presets().iter().filter(|p| p.template.media.id == stock.id) {
+                                    button {key:"{preset.template.id}",r#type:"button",disabled:is_busy,onclick:move |_| {
+                                        load_template(preset.template.duplicate(),preset.values.clone());
+                                    }, "{preset.template.name.split('·').next().unwrap().trim()}" }
+                                } }
+                            }
                         }
                         if !recent_tiles.read().is_empty() {
                             span { class:"muted","最近使用" }

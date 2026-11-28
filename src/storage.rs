@@ -290,25 +290,26 @@ mod tests {
     }
 
     #[test]
-    fn silver_stock_preset_samples_fit_the_printable_sheet() {
+    fn preset_samples_fit_their_stock() {
         for preset in presets() {
             let t = &preset.template;
-            assert!(t.media.is_known_n1());
+
             let svg = crate::core::render_svg(t, &preset.values, "0001").unwrap();
-            assert_eq!(
-                crate::raster::packed_n1(&svg, &t.media).unwrap().len(),
-                200 * 12
-            );
+            let shift = if t.media.is_known_n1() {
+                assert_eq!(
+                    crate::raster::packed_n1(&svg, &t.media).unwrap().len(),
+                    200 * 12
+                );
+                crate::raster::N1_FEED_SHIFT
+            } else {
+                crate::raster::stock_preview_png(&svg, &t.media).unwrap();
+                0
+            };
             let mut previous_bottom = 0;
             for (i, f) in t.elements.iter().enumerate() {
                 let (bounds, art) = crate::core::editor_art(f, &preset.values, "0001", i).unwrap();
                 assert!(
-                    !crate::core::outside_media(
-                        &t.media,
-                        &bounds,
-                        Some(&art),
-                        crate::raster::N1_FEED_SHIFT
-                    ),
+                    !crate::core::outside_media(&t.media, &bounds, Some(&art), shift),
                     "{}",
                     t.name
                 );
