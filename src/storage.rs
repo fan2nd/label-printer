@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn path(file: &str) -> Result<PathBuf, String> {
+pub(crate) fn path(file: &str) -> Result<PathBuf, String> {
     Ok(ProjectDirs::from("", "N1 Label Studio", "N1 Label Studio")
         .ok_or_else(|| "系统没有提供用户数据目录。".to_string())?
         .data_local_dir()
@@ -194,7 +194,7 @@ fn validate_portable(template: &Template) -> Result<(), String> {
     validate_template(template)
 }
 
-fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

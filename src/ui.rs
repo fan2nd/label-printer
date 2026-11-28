@@ -66,7 +66,7 @@ enum FieldBinding {
     Fixed(String),
 }
 
-type Connection = Arc<Mutex<Device>>;
+pub(crate) type Connection = Arc<Mutex<Device>>;
 const UI_CSS: &str = include_str!("../assets/ui.css");
 #[derive(Clone, Copy, PartialEq)]
 struct CanvasDrag {
@@ -260,6 +260,42 @@ pub fn App() -> Element {
     let mut confirm_print = use_signal(|| None::<PrintScope>);
     let mut range_label = use_signal(|| None::<crate::raster::RangeLabel>);
     let mut p2_density = use_signal(|| crate::p2::DEFAULT_DENSITY);
+    let quality_open = use_signal(|| false);
+    let mut quality_open = quality_open;
+    let mut quality_profile = use_signal(|| None::<crate::quality::Profile>);
+    let mut device_key = use_signal(String::new);
+    let profile_key = use_memo(move || {
+        (
+            selected_model(),
+            connection.read().is_some(),
+            device_key(),
+            template.read().media.clone(),
+        )
+    });
+    use_effect(move || {
+        let (model, linked, name, m) = profile_key();
+        if model != Model::P2 || !linked {
+            return;
+        }
+        match crate::quality::preferred(&name, &m) {
+            Ok(Some(p)) => {
+                quality_profile.set(Some(p));
+                p2_density.set(0);
+            }
+            Ok(None) => {
+                if quality_profile
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|p| p.media != m)
+                {
+                    quality_profile.set(None);
+                }
+            }
+            Err(e) => notice.set((e, true)),
+        }
+    });
+    let mut overrides = use_signal(std::collections::BTreeMap::<usize, u8>::new);
+    let mut review_index = use_signal(|| 0usize);
     let mut printing = use_signal(|| false);
     let mut stop_requested = use_signal(|| false);
 
@@ -367,6 +403,59 @@ pub fn App() -> Element {
             .and_then(|serial| core::render_svg(&template.read(), row, &serial))
             .map_err(|e| format!("第 {} 张：{e}", index + 1))
     });
+    let decision = move |svg: &str| -> Result<u8, String> {
+        let stock = &template.read().media;
+        let profile = quality_profile.read();
+        let p = profile.as_ref().ok_or("请选择纸材校准记录。")?;
+        let page = Model::P2.rasterize(svg, stock)?;
+        crate::quality::recommend(p, stock, &page, svg)
+    };
+    let current_level = use_memo(move || {
+        if selected_model() == Model::P2 && p2_density() == 0 {
+            preview().and_then(|svg| decision(&svg))
+        } else {
+            Ok(p2_density())
+        }
+    });
+    let decisions = use_memo(move || {
+        if selected_model() != Model::P2 || p2_density() != 0 {
+            return Vec::new();
+        }
+        match confirm_print() {
+            Some(PrintScope::Current(_)) => vec![current_level()],
+            Some(PrintScope::Batch) => batch_rows
+                .read()
+                .as_ref()
+                .ok()
+                .and_then(|rows| {
+                    core::preflight(
+                        &template.read(),
+                        rows,
+                        count(),
+                        Sequence {
+                            start: start(),
+                            step: step(),
+                            pad: pad(),
+                        },
+                    )
+                    .ok()
+                })
+                .unwrap_or_default()
+                .iter()
+                .map(|svg| decision(svg))
+                .collect(),
+            _ => vec![],
+        }
+    });
+    let unresolved: Vec<_> = decisions
+        .read()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| d.as_ref().err().map(|e| (i, e.clone())))
+        .collect();
+    let all_chosen = unresolved
+        .iter()
+        .all(|(i, _)| overrides.read().contains_key(i));
     let validation = preview.read().as_ref().err().cloned();
     let invalid_page = validation.is_some();
     let is_busy = busy();
@@ -601,6 +690,9 @@ pub fn App() -> Element {
                     onpointerleave:move |event| { if event.pointer_id() == active.pointer { drag.set(None); } }
                 }
             }
+            if quality_open(){
+                crate::quality::panel::QualityPanel {media:media.clone(),device:device_key(),connection,active:quality_profile,open:quality_open,notice,busy,density:p2_density}
+            } else {
             header { class: "bar",
                 div { class: "brand", h1 { "{project_name}" } span { class: "muted", "{physical_caption}" } }
                 div { class:"actions job-actions",
@@ -611,15 +703,20 @@ pub fn App() -> Element {
                     }
                     if model == Model::P2 {
                         label { class:"printer-density", "打印浓度", select { disabled:is_busy, value:"{p2_density}", onchange:move |e| {
-                            if let Ok(level) = e.value().parse::<u8>() { p2_density.set(level); }
-                        }, for level in 1..=15 { option {value:"{level}", "{level}"} } } }
+                            if let Ok(level) = e.value().parse::<u8>() {
+                                let id=if level==0{quality_profile.peek().as_ref().filter(|p|p.media==template.peek().media).map(|p|p.id)}else{None};
+                                if let Err(err)=crate::quality::remember(&device_key(),template.peek().media.id,id){notice.set((err,true));}else{
+                                    p2_density.set(level);if level==0 && id.is_none(){quality_open.set(true);}
+                                }
+                            }
+                        }, option {value:"0","按校准选档"} for level in 1..=15 { option {value:"{level}", "{level}"} } } }
                     }
                     if printing() {
                         button { r#type:"button", disabled:stop_requested(), onclick:move |_| stop_requested.set(true),
                             if stop_requested() { "正在停止…" } else { "停止后续打印" }
                         }
                     } else {
-                        button { r#type:"button", class:"primary", disabled:!can_print || invalid_page || !batch_valid, onclick:move |_| confirm_print.set(Some(PrintScope::Batch)),
+                        button { r#type:"button", class:"primary", disabled:!can_print || invalid_page || !batch_valid, onclick:move |_| {overrides.write().clear();review_index.set(0);confirm_print.set(Some(PrintScope::Batch))},
                             if batch_valid { "打印 {total} 张" } else { "批量打印" }
                         }
                     }
@@ -680,6 +777,8 @@ pub fn App() -> Element {
                                 let port = (model == Model::N1 && usb_mode()).then(|| usb_port());
                                 match model.connect(usb_mode(),port).await {
                                     Ok(mut printer) => {
+                                        device_key.set(printer.name().to_owned());
+                                        if quality_profile.peek().as_ref().is_some_and(|p|p.device!=printer.name()){quality_profile.set(None);}
                                         let mut message=format!("已连接：{}",printer.name());
                                         if let Device::N1(n1) = &mut printer {
                                             match n1.read_stock_barcode().await {
@@ -820,9 +919,10 @@ pub fn App() -> Element {
                 section { class: "editor", "aria-label": "标签设计",
                     div { class: "section-row",
                         h2 { class:"document-title", "{save_name}" }
+                        if model==Model::P2 && p2_density()==0 {span {class:"muted",title:current_level().err().unwrap_or_default(),match current_level(){Ok(l)=>rsx!{"本页浓度 {l}"},Err(_)=>rsx!{"本页需手选"}}}}
                         div { class:"actions",
                             button { r#type:"button", title:"顺时针旋转编辑视图 90°", onclick:move |_| view_turns.set((turns + 1) % 4), "旋转视图 · {angle}°" }
-                        button { r#type:"button", disabled:!can_print || invalid_page, onclick:move |_| confirm_print.set(Some(PrintScope::Current(current_page))), "试打当前页" }
+                        button { r#type:"button", disabled:!can_print || invalid_page, onclick:move |_| {overrides.write().clear();review_index.set(0);confirm_print.set(Some(PrintScope::Current(current_page)))}, "试打当前页" }
                         }
                     }
                     div { class:"preview-layout",
@@ -1071,6 +1171,7 @@ pub fn App() -> Element {
                             }
                         } }
                         span {class:"muted","{layout_name}{corner_name}点阵 {printable_length_dots} × {printable_width_dots} 点"}
+                            if supported_media && model==Model::P2 {button {disabled:is_busy,onclick:move |_| quality_open.set(true),"打印质量校准"}}
                             if supported_media && (model == Model::N1 || (model == Model::P2 && (width_mm,length_mm,w,h)==(40,30,240,320))) {
                                 button { r#type:"button", disabled:is_busy, onclick:move |_| {
                                     match crate::raster::range_label(model, &template.read().media, usb_mode()) {
@@ -1312,6 +1413,7 @@ pub fn App() -> Element {
                     }
                 }
             }
+            }
             if let Some(reason) = error_message {
                 dialog { key:"{show_link_error}", id:"n1-error-dialog", "data-link-loss":show_link_error, class:"dialog native-dialog", "aria-labelledby":"n1-error-title", "aria-describedby":"n1-error-message",
                     onmounted: move |_| {
@@ -1328,7 +1430,7 @@ pub fn App() -> Element {
             }
             if let Some(scope) = confirm_print() {
                     dialog { id:"print-dialog", class:"dialog native-dialog", "aria-labelledby":"print-title",
-                        onmounted:move |_| { let _=document::eval("const d=document.getElementById('print-dialog'); d.addEventListener('cancel', e=>{e.preventDefault();d.querySelector('button').click()}); d.addEventListener('click', e=>{if(e.target.closest('button')) d.close()}); d.showModal(); d.querySelector('button').focus()"); },
+                        onmounted:move |_| { let _=document::eval("const d=document.getElementById('print-dialog'); d.addEventListener('cancel', e=>{e.preventDefault();document.getElementById('cancel-print').click()}); d.showModal(); d.querySelector('button').focus()"); },
                         h2 { id:"print-title", if scope == PrintScope::Range { "{model_name} 四边范围标定" } else if matches!(scope, PrintScope::Current(_)) { "试打第 {number} 条？" } else { "打印 {total} 张标签？" } }
                         if scope == PrintScope::Range {
                             if let Some(label) = range_label.read().as_ref() {
@@ -1345,14 +1447,28 @@ pub fn App() -> Element {
                             p { "请确认 {model_name} 已装好 {width_mm} × {length_mm} mm 标签及对应耗材。" }
                         }
                         }
+                        if !unresolved.is_empty(){
+                            {let pos=review_index().min(unresolved.len()-1);
+                            let (idx,reason)=unresolved[pos].clone();
+                            let indices=unresolved.iter().map(|(i,_)|*i).collect::<Vec<_>>();
+                            let shown=if let PrintScope::Current(n)=scope{n+1}else{idx+1};
+                            rsx!{div{class:"quality-conflict",
+                               p{"自动 {decisions.read().len()-unresolved.len()} 页 · 待选 {unresolved.len()} 页"}
+                               p{"第 {shown} 页：{reason}"}
+                               label{"本次浓度" select{value:overrides.read().get(&idx).copied().unwrap_or(0).to_string(),onchange:move|e|if let Ok(l)=e.value().parse::<u8>(){if l>0{overrides.write().insert(idx,l);}else{overrides.write().remove(&idx);}},option{value:"0","请选择"}for l in 1..=15{option{value:"{l}","{l}"}}}}
+                               div{class:"actions",button{disabled:pos==0,onclick:move |_|review_index.set(pos-1),"上一项"}button{disabled:pos+1>=unresolved.len(),onclick:move |_|review_index.set(pos+1),"下一项"}
+                               button{disabled:!overrides.read().contains_key(&idx),onclick:move |_|{let l=overrides.peek().get(&idx).copied();if let Some(l)=l{for i in &indices{overrides.write().insert(*i,l);}}},"应用到全部待选页"}}
+                            }}}
+                        }
                         div { class: "actions",
-                            button { r#type: "button", onclick: move |_| confirm_print.set(None), "取消" }
-                            button { r#type: "button", class: "primary", disabled:!linked, onclick: move |_| {
+                            button { id:"cancel-print", r#type: "button", onclick: move |_| confirm_print.set(None), "取消" }
+                            button { r#type: "button", class: "primary", disabled:!linked||!all_chosen, onclick: move |_| {
+                                let page_levels: Vec<u8> = decisions.peek().iter().enumerate().filter_map(|(i,d)|d.as_ref().ok().copied().or_else(||overrides.peek().get(&i).copied())).collect();
                                 confirm_print.set(None);
                                 if busy() || !supported_media { return; }
                                 let Some(plan) = PrintJob::new(scope, label_count, copy_count) else { return; };
                                 let repeat = plan.copies;
-                                let density = p2_density();
+                                let density = p2_density().max(1);
                                 let job = match scope {
                                     PrintScope::Range => Ok(Vec::new()),
                                     PrintScope::Current(_) => preview().map(|svg| vec![svg]),
@@ -1387,7 +1503,8 @@ pub fn App() -> Element {
                                                     let total=pages.len() * repeat;
                                                     let mut completed=0;
                                                     let mut failure = None;
-                                                    for buf in pages.iter().flat_map(|page| std::iter::repeat_n(page, repeat)) {
+                                                    for (index,buf) in pages.iter().enumerate().flat_map(|entry| std::iter::repeat_n(entry, repeat)) {
+                                                        let density=page_levels.get(index).copied().unwrap_or(density);
                                                         if stop_requested() { break; }
                                                         notice.set((format!("正在打印第 {} / {} 张…",completed+1,total),false));
                                                         match printer.print_page(buf, density).await {

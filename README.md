@@ -125,3 +125,20 @@ cargo test --no-default-features --features ble --locked
 测试覆盖媒体、Excel、CSV、列匹配、图层排序、序号、条码、96 × 200 点阵旋转、BLE 封包与行编码，以及画布移动/缩放边界和模板文件往返。P2 测试覆盖居中点阵转换与 BLE 消息编码。
 
 Windows 包随附微软 x64 `WebView2Loader.dll`，按 [Microsoft 的桌面分发说明](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution) 部署；不捆绑 WebView2 Runtime 安装程序。
+
+## P2 打印质量校准
+
+桌面端选中 P2，在「规格」打开「打印质量校准」。40 × 30 mm 纸每档一张，共四张。按实物分别评价黑条、字体和机器码，保存并启用后，顶栏可选择「按校准选档」。同一页各项共同合格时取最低档，缺测或冲突时手动选择。
+
+CLI 与桌面共用本机校准记录。用创建命令返回的 UUID 替换下文的 UUID，用实际设备名及纸材建立记录。
+
+```console
+label-printer quality new --device P2 --material 白色热敏纸 --media 40x30
+label-printer quality preview UUID sample.png
+label-printer quality print UUID ble
+label-printer quality items
+label-printer quality rate UUID 5 large 清晰
+label-printer quality list
+```
+
+USB 打印时将 `ble` 改为 `usb`。在普通打印命令中使用 `--profile UUID` 按内容选档，显式指定 `--density` 可覆盖本次选档。

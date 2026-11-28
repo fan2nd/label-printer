@@ -29,6 +29,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// P2 打印质量校准
+    Quality(crate::quality::command::QualityArgs),
     /// 列出内置耗材规格
     Media,
     /// 列出 N1 USB 串口
@@ -55,20 +57,23 @@ enum Command {
         /// P2 打印浓度（1～15，默认 1）
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..=15))]
         density: Option<u8>,
+        /// 按纸材校准 UUID 自动选档，显式 --density 优先
+        #[arg(long)]
+        profile: Option<uuid::Uuid>,
         #[command(flatten)]
         content: Content,
     },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum Transport {
+pub(crate) enum Transport {
     Usb,
     Ble,
 }
 
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("source").required(true).args(["text","template","saved"])))]
-struct Content {
+pub(crate) struct Content {
     /// 打印单行原文
     #[arg(long, conflicts_with_all = ["set","seq"])]
     text: Option<String>,
@@ -98,7 +103,7 @@ fn parse_binding(pair: &str) -> Result<(String, String), String> {
 }
 
 impl Content {
-    fn render(self, model: Model) -> Result<(String, core::Media), String> {
+    pub(crate) fn render(self, model: Model) -> Result<(String, core::Media), String> {
         let Self {
             text,
             template: template_path,
@@ -173,6 +178,7 @@ impl Content {
 
 pub fn run() -> Result<(), String> {
     match Cli::parse().command {
+        Command::Quality(args) => args.run()?,
         Command::Ports => {
             for (path, name) in crate::printer::usb::ports()? {
                 println!("{path}\t{name}");
@@ -226,13 +232,14 @@ pub fn run() -> Result<(), String> {
             transport,
             port,
             density,
+            profile,
             content,
         } => {
             let (svg, media) = content.render(model)?;
             if model == Model::P0 {
                 return Err("P0 仅支持编辑和预览。".into());
             }
-            if density.is_some() && model != Model::P2 {
+            if (density.is_some() || profile.is_some()) && model != Model::P2 {
                 return Err("--density 仅适用于 P2。".into());
             }
             match (model, transport, port.is_some()) {
@@ -242,6 +249,17 @@ pub fn run() -> Result<(), String> {
                 _ => return Err("机型、连接方式和端口组合不匹配，请查看 --help。".into()),
             }
             let page = model.rasterize(&svg, &media)?;
+            let level = match (density, profile) {
+                (Some(l), _) => l,
+                (None, Some(id)) => crate::quality::recommend(
+                    &crate::quality::command::get(id)?,
+                    &media,
+                    &page,
+                    &svg,
+                )
+                .map_err(|e| format!("{e} 请用 --density 指定。"))?,
+                _ => crate::p2::DEFAULT_DENSITY,
+            };
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -250,9 +268,7 @@ pub fn run() -> Result<(), String> {
                     let mut device = model
                         .connect(matches!(transport, Transport::Usb), port)
                         .await?;
-                    let sent = device
-                        .print_page(&page, density.unwrap_or(crate::p2::DEFAULT_DENSITY))
-                        .await;
+                    let sent = device.print_page(&page, level).await;
                     let closed = device.disconnect().await;
                     sent?;
                     println!("{} 已发送 1 张。", model.name());

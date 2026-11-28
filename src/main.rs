@@ -18,6 +18,8 @@ mod picture;
 mod print_job;
 #[cfg(feature = "ble")]
 mod printer;
+#[cfg(feature = "desktop")]
+mod quality;
 mod raster;
 mod stock;
 mod storage;

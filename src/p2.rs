@@ -39,7 +39,7 @@ fn density_command(level: u8) -> Result<[u8; 5], String> {
     if !(1..=15).contains(&level) {
         return Err("P2 打印浓度须为 1～15。".into());
     }
-    Ok([0x1f, 0x43, 1, level - 1, 0x88])
+    Ok([0x1f, 0x43, 1, level - 1, !(0x44 + (level - 1))])
 }
 
 fn validate_bitmap(pixels: &[u8]) -> Result<(), String> {
@@ -272,12 +272,13 @@ mod tests {
 
     #[test]
     fn density_levels_encode_the_default_and_both_limits() {
-        for (level, value) in [(DEFAULT_DENSITY, 0), (9, 8), (15, 14)] {
+        for (level, value) in [(DEFAULT_DENSITY, 0), (5, 4), (9, 8), (15, 14)] {
             assert_eq!(
                 density_command(level).unwrap(),
-                [0x1f, 0x43, 1, value, 0x88]
+                [0x1f, 0x43, 1, value, !(0x44 + value)]
             );
         }
+        assert_eq!(density_command(5).unwrap(), [0x1f, 0x43, 1, 4, 0xb7]); // Official P2 capture
         assert!(density_command(0).is_err());
         assert!(density_command(16).is_err());
     }

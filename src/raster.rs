@@ -259,7 +259,7 @@ pub fn preview_png(packed: &[u8], media: &Media, head_dots: u32) -> Result<Strin
     grayscale_png(along, across, depth, &pixels)
 }
 
-fn grayscale_png(
+pub(crate) fn grayscale_png(
     width: u32,
     height: u32,
     depth: png::BitDepth,

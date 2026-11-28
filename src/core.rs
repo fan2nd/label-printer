@@ -831,10 +831,18 @@ fn sheet_svg<'a>(media: &Media, items: impl Iterator<Item = (&'a Field, &'a str)
     let (width, height) = media.canvas_size();
     let mut svg = format!("<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' viewBox='0 0 {width} {height}'><rect width='{width}' height='{height}' fill='white'/>");
     for (field, artwork) in items {
+        let key = match field.kind {
+            Kind::Text => "text",
+            Kind::Qr => "qr",
+            Kind::Barcode => "barcode",
+            _ => "",
+        };
+        let (w, h) = field.footprint();
+        let font = xml_text(field.font_family.as_deref().unwrap_or(""));
         write!(
             svg,
-            "<g transform='translate({} {})'>{artwork}</g>",
-            field.x, field.y
+            "<g data-quality='{key}' data-region='{} {} {w} {h}' data-font='{}:{font}' transform='translate({} {})'>{artwork}</g>",
+            field.x,field.y,field.text_size(),field.x,field.y
         )
         .unwrap();
     }
@@ -1247,4 +1255,37 @@ fn blank_default_and_cleanup_on_silver_stock() {
     assert!(!outside_media(media, &field, Some(solid), 1));
     field.x = 199;
     assert!(outside_media(media, &field, Some(solid), 1));
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn quality_regions(svg: &str) -> Vec<(String, i64, i64, i64, i64, String)> {
+    let Ok(doc) = roxmltree::Document::parse(svg) else {
+        return Vec::new();
+    };
+    doc.root_element()
+        .children()
+        .filter_map(|node| {
+            let key = node.attribute("data-quality")?;
+            if key.is_empty() {
+                return None;
+            }
+            let v: Vec<i64> = node
+                .attribute("data-region")?
+                .split_whitespace()
+                .map(str::parse)
+                .collect::<Result<_, _>>()
+                .ok()?;
+            let [x, y, w, h] = v.as_slice() else {
+                return None;
+            };
+            Some((
+                key.into(),
+                *x,
+                *y,
+                *w,
+                *h,
+                node.attribute("data-font").unwrap_or("").into(),
+            ))
+        })
+        .collect()
 }
