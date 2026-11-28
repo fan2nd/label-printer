@@ -1,5 +1,6 @@
 //! DeTong P2 BLE printing. The wire format is described in IvanLi-CN/detonger
 //! (docs/ble.md and docs/protocol.md). A successful write is a submission only.
+mod ble_page;
 pub mod usb;
 use btleplug::{
     api::{
@@ -55,11 +56,7 @@ fn bitmap_messages(pixels: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     let mut rows = pixels.chunks_exact(STRIDE).peekable();
     let mut messages = Vec::new();
     while let Some(row) = rows.next() {
-        if let Some(first) = row.iter().position(|&byte| byte != 0) {
-            let last = row.iter().rposition(|&byte| byte != 0).unwrap();
-            let ink = &row[first..=last];
-            let mut message = vec![0x1f, 0x2b, first as u8, ink.len() as u8];
-            message.extend_from_slice(ink);
+        if let Some(message) = ink_command(row) {
             messages.push(message);
         } else {
             let mut blank = 1u8;
@@ -73,47 +70,13 @@ fn bitmap_messages(pixels: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     Ok(messages)
 }
 
-// Keep the existing row and blank-feed encoding, but collapse adjacent
-// identical ink rows before batching the BLE command stream.
-fn ble_packets(pixels: &[u8], density: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    let mut rows = bitmap_messages(pixels)?;
-    rows.last_mut().unwrap().pop(); // emit the page terminator after the final repeat
-                                    // btleplug 0.11 does not expose negotiated MTU. Coalesce up to the
-                                    // default ATT payload or a row size already required by this page.
-    let budget = rows.iter().map(Vec::len).max().unwrap().max(20);
-    let mut packets: Vec<Vec<u8>> = Vec::new();
-    let mut append = |cmd: &[u8]| {
-        if let Some(last) = packets.last_mut() {
-            if last.len() + cmd.len() <= budget {
-                last.extend_from_slice(cmd);
-                return;
-            }
-        }
-        packets.push(cmd.to_vec());
-    };
-    for cmd in SETUP.into_iter().chain([density]) {
-        append(cmd);
-    }
-    let mut rows = rows.iter().peekable();
-    while let Some(row) = rows.next() {
-        append(row);
-        if row.starts_with(&[0x1f, 0x2b]) {
-            let mut additional = 0usize;
-            while rows.next_if_eq(&row).is_some() {
-                additional += 1;
-            }
-            if additional > 0 {
-                let n = additional - 1;
-                if n < 192 {
-                    append(&[0x1f, 0x2e, n as u8]);
-                } else {
-                    append(&[0x1f, 0x2e, 0xc0 | (n >> 8) as u8, n as u8]);
-                }
-            }
-        }
-    }
-    append(&[0x0c]);
-    Ok(packets)
+fn ink_command(row: &[u8]) -> Option<Vec<u8>> {
+    let first = row.iter().position(|&b| b != 0)?;
+    let last = row.iter().rposition(|&b| b != 0).unwrap();
+    let ink = &row[first..=last];
+    let mut cmd = vec![0x1f, 0x2b, first as u8, ink.len() as u8];
+    cmd.extend_from_slice(ink);
+    Some(cmd)
 }
 
 fn is_p2(name: &str) -> bool {
@@ -262,14 +225,20 @@ impl Printer {
     }
 
     pub async fn print_page(&mut self, pixels: &[u8], density: u8) -> Result<(), String> {
-        let density = density_command(density)?;
-        let packets = ble_packets(pixels, &density)?;
+        let stream = ble_page::encode(pixels, density)?;
         if !self.is_connected().await {
             return Err("P2 已断开，请重新连接。".into());
         }
+        // Both single-PDU ATT write modes have a three-byte opcode/handle header.
+        let capacity = usize::from(self.peripheral.mtu())
+            .checked_sub(3)
+            .filter(|&n| n > 0)
+            .ok_or("P2 蓝牙写入容量无效。")?
+            .min(512);
+        let started = std::time::Instant::now();
         let send = async {
-            for packet in packets {
-                self.write(&packet).await?;
+            for packet in stream.chunks(capacity) {
+                self.write(packet).await?;
             }
             Ok(())
         };
@@ -281,6 +250,16 @@ impl Printer {
             self.usable = false;
             let _ = self.disconnect().await;
         } else {
+            if std::env::var_os("LABEL_PRINTER_BLE_TRACE").is_some() {
+                eprintln!(
+                    "P2 BLE {:?}: {} bytes, {} bytes/write, {} writes, {:.1} ms",
+                    self.mode,
+                    stream.len(),
+                    capacity,
+                    stream.len().div_ceil(capacity),
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             sleep(Duration::from_secs(2)).await;
         }
         sent
@@ -318,16 +297,16 @@ mod tests {
         let mut row = [0; STRIDE];
         row[4..44].fill(0xff);
         let density = density_command(1).unwrap();
-        let packets = ble_packets(&row.repeat(240), &density).unwrap();
-        assert_eq!(packets.len(), 3);
-        let setup = SETUP
-            .into_iter()
-            .chain([density.as_slice()])
-            .collect::<Vec<_>>()
-            .concat();
-        assert_eq!(packets[0], setup);
-        assert_eq!(packets[1], [&[0x1f, 0x2b, 4, 40][..], &[0xff; 40]].concat());
-        assert_eq!(packets[2], [0x1f, 0x2e, 0xc0, 0xee, 0x0c]);
+        let stream = ble_page::encode(&row.repeat(240), 1).unwrap();
+        let expected = [
+            SETUP.concat(),
+            density.to_vec(),
+            vec![0x1f, 0x2b, 4, 40],
+            vec![0xff; 40],
+            vec![0x1f, 0x2e, 0xc0, 0xee, 0x0c],
+        ]
+        .concat();
+        assert_eq!(stream, expected);
     }
 
     #[test]
@@ -345,7 +324,7 @@ mod tests {
             let mut page = row.repeat(count);
             page.extend([0; STRIDE]);
             page.extend(row);
-            let stream = ble_packets(&page, &density).unwrap().concat();
+            let stream = ble_page::encode(&page, 1).unwrap();
             let mut expected = vec![0x1f, 0x2b, 2, 1, 1];
             if !repeat.is_empty() {
                 expected.extend([0x1f, 0x2e]);

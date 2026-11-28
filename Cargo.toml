@@ -26,7 +26,7 @@ dioxus = { version = "=0.7.10", features = ["desktop"], optional = true }
 rfd = { version = "0.17", optional = true }
 hidapi = { version = "2.6.6", optional = true }
 serialport = { version = "4.10", default-features = false, optional = true }
-btleplug = { version = "0.11.8", optional = true }
+btleplug = { version = "0.13.5", optional = true }
 futures = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["time", "rt", "sync"], optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
