@@ -25,7 +25,7 @@ const WRITE_ENDPOINTS: [(Uuid, Uuid); 2] = [
 const STRIDE: usize = 48;
 const MAX_ROWS: usize = 1600;
 
-// One die-cut label per job. Each entry is a separate, short GATT message.
+// Setup commands for one die-cut label.
 pub const DEFAULT_DENSITY: u8 = 1;
 const SETUP: [&[u8]; 4] = [
     &[0x1f, 0x20, 2, 0, 1, 0x88], // start page 1
@@ -71,6 +71,49 @@ fn bitmap_messages(pixels: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     }
     messages.last_mut().unwrap().push(0x0c);
     Ok(messages)
+}
+
+// Keep the existing row and blank-feed encoding, but collapse adjacent
+// identical ink rows before batching the BLE command stream.
+fn ble_packets(pixels: &[u8], density: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let mut rows = bitmap_messages(pixels)?;
+    rows.last_mut().unwrap().pop(); // emit the page terminator after the final repeat
+                                    // btleplug 0.11 does not expose negotiated MTU. Coalesce up to the
+                                    // default ATT payload or a row size already required by this page.
+    let budget = rows.iter().map(Vec::len).max().unwrap().max(20);
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    let mut append = |cmd: &[u8]| {
+        if let Some(last) = packets.last_mut() {
+            if last.len() + cmd.len() <= budget {
+                last.extend_from_slice(cmd);
+                return;
+            }
+        }
+        packets.push(cmd.to_vec());
+    };
+    for cmd in SETUP.into_iter().chain([density]) {
+        append(cmd);
+    }
+    let mut rows = rows.iter().peekable();
+    while let Some(row) = rows.next() {
+        append(row);
+        if row.starts_with(&[0x1f, 0x2b]) {
+            let mut additional = 0usize;
+            while rows.next_if_eq(&row).is_some() {
+                additional += 1;
+            }
+            if additional > 0 {
+                let n = additional - 1;
+                if n < 192 {
+                    append(&[0x1f, 0x2e, n as u8]);
+                } else {
+                    append(&[0x1f, 0x2e, 0xc0 | (n >> 8) as u8, n as u8]);
+                }
+            }
+        }
+    }
+    append(&[0x0c]);
+    Ok(packets)
 }
 
 fn is_p2(name: &str) -> bool {
@@ -220,16 +263,13 @@ impl Printer {
 
     pub async fn print_page(&mut self, pixels: &[u8], density: u8) -> Result<(), String> {
         let density = density_command(density)?;
-        let rows = bitmap_messages(pixels)?;
+        let packets = ble_packets(pixels, &density)?;
         if !self.is_connected().await {
             return Err("P2 已断开，请重新连接。".into());
         }
         let send = async {
-            for command in SETUP.into_iter().chain([density.as_slice()]) {
-                self.write(command).await?;
-            }
-            for row in rows {
-                self.write(&row).await?;
+            for packet in packets {
+                self.write(&packet).await?;
             }
             Ok(())
         };
@@ -270,6 +310,52 @@ mod tests {
         }
         for name in ["P20", "P2P-123", "P1", "DP27P", "P2S"] {
             assert!(!is_p2(name));
+        }
+    }
+
+    #[test]
+    fn ble_batches_the_captured_solid_page_and_preserves_its_rows() {
+        let mut row = [0; STRIDE];
+        row[4..44].fill(0xff);
+        let density = density_command(1).unwrap();
+        let packets = ble_packets(&row.repeat(240), &density).unwrap();
+        assert_eq!(packets.len(), 3);
+        let setup = SETUP
+            .into_iter()
+            .chain([density.as_slice()])
+            .collect::<Vec<_>>()
+            .concat();
+        assert_eq!(packets[0], setup);
+        assert_eq!(packets[1], [&[0x1f, 0x2b, 4, 40][..], &[0xff; 40]].concat());
+        assert_eq!(packets[2], [0x1f, 0x2e, 0xc0, 0xee, 0x0c]);
+    }
+
+    #[test]
+    fn ble_repeat_count_boundaries_and_blank_runs() {
+        let density = density_command(1).unwrap();
+        for (count, repeat) in [
+            (1, vec![]),
+            (2, vec![0]),
+            (193, vec![191]),
+            (194, vec![0xc0, 192]),
+            (258, vec![0xc1, 0]),
+        ] {
+            let mut row = [0; STRIDE];
+            row[2] = 1;
+            let mut page = row.repeat(count);
+            page.extend([0; STRIDE]);
+            page.extend(row);
+            let stream = ble_packets(&page, &density).unwrap().concat();
+            let mut expected = vec![0x1f, 0x2b, 2, 1, 1];
+            if !repeat.is_empty() {
+                expected.extend([0x1f, 0x2e]);
+                expected.extend(repeat);
+            }
+            expected.extend([0x1b, 0x4a, 1, 0x1f, 0x2b, 2, 1, 1, 0x0c]);
+            assert_eq!(
+                &stream[SETUP.iter().map(|s| s.len()).sum::<usize>() + density.len()..],
+                expected
+            );
         }
     }
 
